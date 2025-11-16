@@ -7,7 +7,7 @@ using PyDESeq2 (DESeq2 implementation in Python).
 
 import pandas as pd
 import numpy as np
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, Tuple, Dict, List, Any
 from anndata import AnnData
 
 try:
@@ -29,40 +29,17 @@ class DGEAnalyzer:
     - Find significant differentially expressed genes
     - Extract top K genes by significance
     - Save results to file
-    
-    Attributes:
-    -----------
-    method : str
-        DGE method to use (default: "deseq2")
-    data_file : AnnData
-        AnnData object containing gene expression data
-    threshold : dict
-        Thresholds for significance filtering. Default: 
-        {'padj': 0.05, 'log2fc': 1.0}
-    topK : int
-        Number of top genes to return (default: 10)
-    output_file : str
-        Output file name for results (default: "dge_results.csv")
-    condition : str
-        Column name in adata.obs for the condition/group variable
-    group1 : str
-        Name of the first group to compare (numerator in fold change)
-    group2 : str
-        Name of the second group to compare (denominator in fold change)
-    min_counts : int
-        Minimum total counts across samples to keep a gene (default: 10)
-    n_cpus : int
-        Number of CPUs to use for parallel processing (default: 4)
-    control_genes : Optional[List[str]]
-        List of control/housekeeping genes for normalization (default: None)
+
+    Methods:
+    - run_dge(): Run DGE analysis
+    - get_results(): Extract results for all group pairs
     """
     
     def __init__(
         self,
         data_file: AnnData,
         condition: str,
-        group1: str,
-        group2: str,
+        groups: List[Tuple[str, str]],
         method: str = "deseq2",
         threshold: Optional[Dict[str, float]] = None,
         topK: int = 10,
@@ -81,12 +58,9 @@ class DGEAnalyzer:
             Must have raw counts in .X and metadata in .obs
         condition : str
             Column name in adata.obs specifying the condition/group variable
-        group1 : str
-            Name of group 1 (numerator in fold change calculation)
-            Example: "treated", "disease", "B"
-        group2 : str
-            Name of group 2 (denominator in fold change calculation)
-            Example: "control", "healthy", "A"
+        groups : list of tuples
+            List of (group1, group2) tuples for multiple comparisons
+            Example: [("treated", "control"), ("disease", "healthy")]
         method : str, optional
             DGE method to use (default: "deseq2")
         threshold : dict, optional
@@ -110,11 +84,36 @@ class DGEAnalyzer:
                 "Install with: pip install pydeseq2"
             )
         
-        # Store parameters
+        # Validate condition column exists
+        if condition not in data_file.obs.columns:
+            raise ValueError(
+                f"Condition column '{condition}' not found in adata.obs. "
+                f"Available columns: {list(data_file.obs.columns)}"
+            )
+        
+        # Validate and process groups
+        if not groups:
+            raise ValueError("'groups' list must contain at least one (group1, group2) tuple")
+        
+        unique_conditions = data_file.obs[condition].unique()
+        
+        # Validate all groups exist
+        for g1, g2 in groups:
+            if g1 not in unique_conditions:
+                raise ValueError(
+                    f"Group '{g1}' not found in condition '{condition}'. "
+                    f"Available groups: {list(unique_conditions)}"
+                )
+            if g2 not in unique_conditions:
+                raise ValueError(
+                    f"Group '{g2}' not found in condition '{condition}'. "
+                    f"Available groups: {list(unique_conditions)}"
+                )
+        
+        # Store groups
+        self.groups = groups        # Store parameters
         self.data_file = data_file
         self.condition = condition
-        self.group1 = group1
-        self.group2 = group2
         self.method = method
         self.topK = topK
         self.output_file = output_file
@@ -127,31 +126,11 @@ class DGEAnalyzer:
             threshold = {'padj': 0.05, 'log2fc': 1.0}
         self.threshold = threshold
         
-        # Validate condition column exists
-        if condition not in data_file.obs.columns:
-            raise ValueError(
-                f"Condition column '{condition}' not found in adata.obs. "
-                f"Available columns: {list(data_file.obs.columns)}"
-            )
-        
-        # Validate groups exist
-        unique_conditions = data_file.obs[condition].unique()
-        if group1 not in unique_conditions:
-            raise ValueError(
-                f"Group '{group1}' not found in condition '{condition}'. "
-                f"Available groups: {list(unique_conditions)}"
-            )
-        if group2 not in unique_conditions:
-            raise ValueError(
-                f"Group '{group2}' not found in condition '{condition}'. "
-                f"Available groups: {list(unique_conditions)}"
-            )
-        
         # Initialize results attributes
         self.dds = None  # DeseqDataSet object
-        self.stat_res = None  # DeseqStats object
-        self.results = None  # Results DataFrame
-        self.significant_genes = None  # Filtered significant genes
+        self.stat_res_dict = {}  # Dictionary of DeseqStats objects for each group pair
+        self.results_dict = {}  # Dictionary of results DataFrames for each group pair
+        self.significant_genes_dict = {}  # Dictionary of significant genes for each group pair
         
         # Store extracted counts and metadata
         self.counts_df = None
@@ -248,146 +227,164 @@ class DGEAnalyzer:
         self.dds.deseq2()
         print("DESeq2 pipeline complete.")
         
-        # Extract results
-        print(f"\nExtracting results: {self.group1} vs {self.group2}")
-        self.stat_res = DeseqStats(
-            self.dds,
-            contrast=[self.condition, self.group1, self.group2],
-            inference=inference,
-            n_cpus=self.n_cpus
-        )
+        print(f"\nDGE analysis complete. Use get_results() to extract results for group pairs.")
         
-        # Generate summary
-        self.stat_res.summary()
-        
-        # Get results DataFrame
-        self.results = self.stat_res.results_df
-        
-        print(f"\nDGE analysis complete. Total genes tested: {len(self.results)}")
-        
-        return self.results
+        return self.dds
     
-    def find_significant_genes(self) -> pd.DataFrame:
+    def get_results(
+        self,
+        groups: Optional[List[Tuple[str, str]]] = None,
+        save: bool = True,
+        filename_prefix: Optional[str] = None
+    ) -> Dict[str, Dict[str, Any]]:
         """
-        Find significant differentially expressed genes based on thresholds.
+        Extract results, find significant genes, get top genes, and save results
+        for all group pairs.
         
-        Returns:
-        --------
-        significant_genes : pd.DataFrame
-            DataFrame with significant genes filtered by padj and log2fc thresholds
-        """
-        if self.results is None:
-            raise ValueError("Results not available. Run run_dge() first.")
-        
-        padj_threshold = self.threshold.get('padj', 0.05)
-        log2fc_threshold = self.threshold.get('log2fc', 1.0)
-        
-        print(f"\nFiltering significant genes...")
-        print(f"  Thresholds: padj < {padj_threshold}, |log2FC| > {log2fc_threshold}")
-        
-        # Filter significant genes
-        mask = (
-            (self.results['padj'] < padj_threshold) &  # Statistically significant
-            (abs(self.results['log2FoldChange']) > log2fc_threshold)  # Biologically significant
-        )
-        
-        self.significant_genes = self.results[mask].copy()
-        
-        print(f"  Significant DEGs found: {len(self.significant_genes)}")
-        
-        # Print summary by direction
-        if len(self.significant_genes) > 0:
-            upregulated = (self.significant_genes['log2FoldChange'] > 0).sum()
-            downregulated = (self.significant_genes['log2FoldChange'] < 0).sum()
-            print(f"    Upregulated ({self.group1} > {self.group2}): {upregulated}")
-            print(f"    Downregulated ({self.group1} < {self.group2}): {downregulated}")
-        
-        return self.significant_genes
-    
-    def get_top_genes(self, k: Optional[int] = None, sort_by: str = 'padj') -> pd.DataFrame:
-        """
-        Get top K genes sorted by significance.
+        This method combines:
+        - Extracting results using DeseqStats (lines 251-258 equivalent)
+        - Finding significant genes
+        - Getting top genes
+        - Saving results to files
         
         Parameters:
         -----------
-        k : int, optional
-            Number of top genes to return. If None, uses self.topK (default: None)
-        sort_by : str, optional
-            Column to sort by. Options: 'padj', 'pvalue', 'log2FoldChange' (default: 'padj')
-        
+        groups : list of tuples, optional
+            List of (group1, group2) tuples for comparisons.
+            If None, uses self.groups from initialization (default: None)
+        save : bool, optional
+            Whether to save results to files (default: True)
+        filename_prefix : str, optional
+            Prefix for output filenames. If None, uses self.output_file as base (default: None)
+            
         Returns:
         --------
-        top_genes : pd.DataFrame
-            Top K genes sorted by specified column
+        results_dict : dict
+            Dictionary with keys as f"{group1}_vs_{group2}" containing:
+            - 'stat_res': DeseqStats object
+            - 'results': All results DataFrame
+            - 'significant_genes': Significant genes DataFrame
+            - 'top_genes': Top K genes DataFrame
         """
-        if self.significant_genes is None:
-            # Use all results if significant_genes not filtered yet
-            if self.results is None:
-                raise ValueError("Results not available. Run run_dge() first.")
-            genes_df = self.results
-        else:
-            genes_df = self.significant_genes
+        if self.dds is None:
+            raise ValueError("DeseqDataSet not available. Run run_dge() first.")
         
-        if k is None:
-            k = self.topK
+        # Use provided groups or self.groups
+        if groups is None:
+            groups = self.groups
         
-        # Validate sort_by column
-        if sort_by not in genes_df.columns:
-            raise ValueError(
-                f"Sort column '{sort_by}' not found. "
-                f"Available columns: {list(genes_df.columns)}"
+        if not groups:
+            raise ValueError("No groups provided. Specify groups in __init__ or get_results().")
+        
+        # Initialize inference
+        inference = DefaultInference()
+        
+        # Dictionary to store all results
+        all_results = {}
+        
+        print("=" * 60)
+        print(f"Processing {len(groups)} group comparison(s)")
+        print("=" * 60)
+        
+        # Iterate over all group pairs
+        for idx, (group1, group2) in enumerate(groups, 1):
+            print(f"\n[{idx}/{len(groups)}] Processing: {group1} vs {group2}")
+            print("-" * 60)
+            
+            # Extract results (equivalent to lines 251-258)
+            print(f"Extracting results: {group1} vs {group2}")
+            stat_res = DeseqStats(
+                self.dds,
+                contrast=[self.condition, group1, group2],
+                inference=inference,
+                n_cpus=self.n_cpus
             )
+            
+            # Generate summary
+            stat_res.summary()
+            
+            # Get results DataFrame
+            results = stat_res.results_df
+            print(f"Total genes tested: {len(results)}")
+            
+            # Store stat_res and results
+            pair_key = f"{group1}_vs_{group2}"
+            self.stat_res_dict[pair_key] = stat_res
+            self.results_dict[pair_key] = results
+            
+            # Find significant genes
+            padj_threshold = self.threshold.get('padj', 0.05)
+            log2fc_threshold = self.threshold.get('log2fc', 1.0)
+            
+            print(f"\nFiltering significant genes...")
+            print(f"  Thresholds: padj < {padj_threshold}, |log2FC| > {log2fc_threshold}")
+            
+            mask = (
+                (results['padj'] < padj_threshold) &
+                (abs(results['log2FoldChange']) > log2fc_threshold)
+            )
+            
+            significant_genes = results[mask].copy()
+            self.significant_genes_dict[pair_key] = significant_genes
+            
+            print(f"  Significant DEGs found: {len(significant_genes)}")
+            
+            # Print summary by direction
+            if len(significant_genes) > 0:
+                upregulated = (significant_genes['log2FoldChange'] > 0).sum()
+                downregulated = (significant_genes['log2FoldChange'] < 0).sum()
+                print(f"    Upregulated ({group1} > {group2}): {upregulated}")
+                print(f"    Downregulated ({group1} < {group2}): {downregulated}")
+            
+            # Get top genes
+            genes_df = significant_genes if len(significant_genes) > 0 else results
+            sort_by = 'padj'
+            ascending = True if sort_by in ['padj', 'pvalue'] else False
+            top_genes = genes_df.sort_values(sort_by, ascending=ascending).head(self.topK)
+            
+            print(f"\nTop {self.topK} genes sorted by {sort_by}:")
+            print(top_genes[['log2FoldChange', 'padj', 'baseMean']].head(self.topK))
+            
+            # Save results if requested
+            if save:
+                if filename_prefix is None:
+                    # Extract base filename without extension
+                    base = self.output_file.rsplit('.', 1)[0] if '.' in self.output_file else self.output_file
+                    filename = f"{base}_{pair_key}.csv"
+                else:
+                    filename = f"{filename_prefix}_{pair_key}.csv"
+                
+                results.to_csv(filename)
+                print(f"\nResults saved to '{filename}'")
+            
+            # Store all results for this pair
+            all_results[pair_key] = {
+                'stat_res': stat_res,
+                'results': results,
+                'significant_genes': significant_genes,
+                'top_genes': top_genes
+            }
         
-        # Sort and get top K
-        ascending = True if sort_by in ['padj', 'pvalue'] else False
+        print("\n" + "=" * 60)
+        print("All comparisons complete!")
+        print("=" * 60)
         
-        top_genes = genes_df.sort_values(sort_by, ascending=ascending).head(k)
-        
-        print(f"\nTop {k} genes sorted by {sort_by}:")
-        print(top_genes[['log2FoldChange', 'padj', 'baseMean']].head(k))
-        
-        return top_genes
+        return all_results
     
-    def save_results(self, filename: Optional[str] = None) -> str:
-        """
-        Save DGE results to CSV file.
-        
-        Parameters:
-        -----------
-        filename : str, optional
-            Output filename. If None, uses self.output_file (default: None)
-        
-        Returns:
-        --------
-        filename : str
-            Path to saved file
-        """
-        if self.results is None:
-            raise ValueError("Results not available. Run run_dge() first.")
-        
-        if filename is None:
-            filename = self.output_file
-        
-        self.results.to_csv(filename)
-        print(f"\nResults saved to '{filename}'")
-        
-        return filename
-    
-    def run_full_analysis(self) -> Dict[str, pd.DataFrame]:
+    def run_full_analysis(self) -> Dict[str, Any]:
         """
         Run complete DGE analysis pipeline.
         
         This method runs all steps:
         1. Run DGE analysis
-        2. Find significant genes
-        3. Get top K genes
-        4. Save results
+        2. Get results for all group pairs (extracts, filters, gets top genes, saves)
         
         Returns:
         --------
         results_dict : dict
-            Dictionary containing:
-            - 'all_results': All DGE results
+            Dictionary with keys as f"{group1}_vs_{group2}" containing:
+            - 'stat_res': DeseqStats object
+            - 'results': All DGE results
             - 'significant_genes': Significant DEGs
             - 'top_genes': Top K genes
         """
@@ -396,37 +393,31 @@ class DGEAnalyzer:
         print("=" * 60)
         
         # Step 1: Run DGE
-        all_results = self.run_dge()
+        self.run_dge()
         
-        # Step 2: Find significant genes
-        significant = self.find_significant_genes()
-        
-        # Step 3: Get top genes
-        top_genes = self.get_top_genes()
-        
-        # Step 4: Save results
-        self.save_results()
-        
-        results_dict = {
-            'all_results': all_results,
-            'significant_genes': significant,
-            'top_genes': top_genes
-        }
+        # Step 2: Get results for all group pairs
+        # This combines: extracting results, finding significant genes,
+        # getting top genes, and saving results
+        all_results = self.get_results()
         
         print("\n" + "=" * 60)
         print("Analysis Complete!")
         print("=" * 60)
         
-        return results_dict
+        return all_results
     
     def __repr__(self):
         """String representation of the DGEAnalyzer object."""
-        status = "Analysis run" if self.results is not None else "Not run"
+        status = "Analysis run" if len(self.results_dict) > 0 else "Not run"
+        if len(self.groups) > 1:
+            comparisons = f"{len(self.groups)} comparisons: {self.groups}"
+        else:
+            comparisons = f"{self.group1} vs {self.group2}"
         return (
             f"DGEAnalyzer(\n"
             f"  method='{self.method}',\n"
             f"  condition='{self.condition}',\n"
-            f"  comparison='{self.group1} vs {self.group2}',\n"
+            f"  comparisons={comparisons},\n"
             f"  threshold={self.threshold},\n"
             f"  topK={self.topK},\n"
             f"  output_file='{self.output_file}',\n"
@@ -469,12 +460,11 @@ if __name__ == "__main__":
     adata.var_names = [f'Gene_{i}' for i in range(n_genes)]
     adata.obs_names = [f'Cell_{i}' for i in range(n_cells)]
     
-    # Create DGE analyzer
+    # Create DGE analyzer with group comparisons
     dge = DGEAnalyzer(
         data_file=adata,
         condition="condition",
-        group1="B",
-        group2="A",
+        groups=[("B", "A")],  # Can add more comparisons: [("B", "A"), ("C", "A")]
         method="deseq2",
         threshold={'padj': 0.05, 'log2fc': 0.5},
         topK=10,
@@ -486,10 +476,12 @@ if __name__ == "__main__":
     # Run full analysis
     results = dge.run_full_analysis()
     
-    # Access results
+    # Access results for each comparison
     print("\nAccessing results:")
-    print(f"Total genes tested: {len(results['all_results'])}")
-    print(f"Significant DEGs: {len(results['significant_genes'])}")
-    print(f"Top {dge.topK} genes:")
-    print(results['top_genes'])
+    for comparison_key, comparison_results in results.items():
+        print(f"\nComparison: {comparison_key}")
+        print(f"Total genes tested: {len(comparison_results['results'])}")
+        print(f"Significant DEGs: {len(comparison_results['significant_genes'])}")
+        print(f"Top {dge.topK} genes:")
+        print(comparison_results['top_genes'])
 

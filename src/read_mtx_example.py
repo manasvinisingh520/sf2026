@@ -10,100 +10,11 @@ The typical 10X Genomics format includes:
 - barcodes.tsv: Cell barcodes (columns)
 """
 
-import scipy.io
 import pandas as pd
 import numpy as np
-from scipy.sparse import csr_matrix, csc_matrix
 import random
 
-
-def read_mtx_file(mtx_path, row_annotation_path=None, col_annotation_path=None, 
-                  transpose=True, make_gene_names_unique=True):
-    """
-    Read a .mtx file and optionally load row/column annotations.
-    
-    Parameters:
-    -----------
-    mtx_path : str
-        Path to the .mtx file
-    row_annotation_path : str, optional
-        Path to file with row names (genes/features). 
-        Each line should contain one name.
-    col_annotation_path : str, optional
-        Path to file with column names (cell barcodes).
-        Each line should contain one name.
-    transpose : bool, default=True
-        If True, transpose the matrix so rows=genes, cols=cells.
-        MTX format typically stores cells as rows and genes as columns.
-    make_gene_names_unique : bool, default=True
-        If True, ensure gene names are unique by appending _1, _2, etc.
-    
-    Returns:
-    --------
-    matrix : scipy.sparse.csr_matrix or scipy.sparse.csc_matrix
-        Sparse matrix representation
-    gene_names : array-like, optional
-        Gene/feature names if row_annotation_path provided
-    cell_names : array-like, optional
-        Cell barcode names if col_annotation_path provided
-    """
-    
-    # Read the .mtx file using scipy
-    # This returns a COO (Coordinate) format sparse matrix
-    matrix = scipy.io.mmread(mtx_path)
-    
-    print(f"Loaded matrix shape: {matrix.shape}")
-    print(f"Matrix format: {matrix.format}")
-    print(f"Number of non-zero entries: {matrix.nnz:,}")
-    print(f"Sparsity: {(1 - matrix.nnz / (matrix.shape[0] * matrix.shape[1])) * 100:.2f}%")
-    
-    # Transpose if needed (MTX format often has cells as rows, genes as columns)
-    if transpose:
-        matrix = matrix.T
-        print(f"Transposed matrix shape: {matrix.shape}")
-    
-    # Convert to CSR format for efficient row operations (or CSC for column operations)
-    # CSR is typically preferred for most operations
-    matrix = csr_matrix(matrix)
-    
-    # Load row annotations (genes/features) if provided
-    gene_names = None
-    if row_annotation_path:
-        # Read gene names from file
-        # Handle different formats (quoted strings, CSV, TSV, etc.)
-        try:
-            with open(row_annotation_path, 'r') as f:
-                gene_names = [line.strip().strip('"') for line in f]
-            
-            # Handle unique gene names (common issue in scRNA-seq)
-            if make_gene_names_unique:
-                unique_names = []
-                name_counts = {}
-                for name in gene_names:
-                    if name in name_counts:
-                        name_counts[name] += 1
-                        unique_names.append(f"{name}_{name_counts[name]}")
-                    else:
-                        name_counts[name] = 0
-                        unique_names.append(name)
-                gene_names = unique_names
-            
-            print(f"Loaded {len(gene_names)} gene names")
-            
-        except Exception as e:
-            print(f"Warning: Could not load row annotations: {e}")
-    
-    # Load column annotations (cell barcodes) if provided
-    cell_names = None
-    if col_annotation_path:
-        try:
-            with open(col_annotation_path, 'r') as f:
-                cell_names = [line.strip().strip('"') for line in f]
-            print(f"Loaded {len(cell_names)} cell barcodes")
-        except Exception as e:
-            print(f"Warning: Could not load column annotations: {e}")
-    
-    return matrix, gene_names, cell_names
+from utils import read_mtx_file, create_anndata_object, read_excel_columns
 
 
 def convert_to_dense(matrix, subset_genes=None, subset_cells=None):
@@ -133,71 +44,25 @@ def convert_to_dense(matrix, subset_genes=None, subset_cells=None):
     return matrix.toarray()
 
 
-def create_anndata_object(matrix, gene_names=None, cell_names=None, obs=None, transpose=False):
-    """
-    Create an AnnData object (standard format for single-cell analysis).
-    Requires scanpy/anndata package.
-    
-    Parameters:
-    -----------
-    matrix : scipy.sparse matrix
-        Expression matrix (assumed to be genes × cells if transpose=False)
-    gene_names : array-like, optional
-        Gene names
-    cell_names : array-like, optional
-        Cell barcodes
-    obs : pandas.DataFrame, optional
-        Cell metadata (must have same number of rows as cells)
-    transpose : bool, default=False
-        If True, transpose the matrix before creating AnnData
-        (AnnData expects cells as rows, genes as columns)
-    
-    Returns:
-    --------
-    adata : anndata.AnnData
-        AnnData object ready for analysis
-    """
-    try:
-        import anndata as ad
-        
-        # Create AnnData object
-        # AnnData expects cells as rows (obs), genes as columns (var)
-        if transpose:
-            adata = ad.AnnData(matrix.T)
-        else:
-            # Matrix is already in cells × genes format
-            adata = ad.AnnData(matrix)
-        
-        if gene_names is not None:
-            adata.var_names = gene_names
-        if cell_names is not None:
-            adata.obs_names = cell_names
-        if obs is not None:
-            adata.obs = obs
-        
-        return adata
-    
-    except ImportError:
-        print("anndata package not installed. Install with: pip install anndata scanpy")
-        return None
-
-
 # Example usage
 if __name__ == "__main__":
     # Paths to your files
     mtx_path = r"i:\sf2026\data\2025-10-22_Astrocytes_EC_matrix.mtx"
-    row_annotation_path = r"i:\sf2026\data\2025-10-22_Astrocytes_EC_row_annotation.txt"
-    col_annotation_path = r"i:\sf2026\data\2025-10-22_Astrocytes_EC_cell_annotation.txt"
-    metadata_path = r"i:\sf2026\data\2025-10-18_Astrocytes_metadata.csv"
-    metadata = pd.read_csv(metadata_path, low_memory=False)
+    row_annotation_path = r"i:\sf2026\data\2025-10-22_Astrocytes_EC_row_annotation.txt" # genes.tsv
+    col_annotation_path = r"i:\sf2026\data\2025-10-22_Astrocytes_EC_cell_annotation.txt" # cells.tsv
+    metadata_path = r"i:\sf2026\data\2025-11-16_Astrocytes_metadata.xlsx" # metadata.xlsx
+    #metadata = pd.read_csv(metadata_path, low_memory=False)
+    metadata = read_excel_columns(metadata_path, columns=['cell_annotation', "RIN", "Path..Group."])
 
     # Print all column names and values from the first row (index 0) of the metadata DataFrame
+    print(f"Number of rows in metadata: {len(metadata.index)}")
     print("\n" + "=" * 60)
     print("First Row of Metadata:")
     print("=" * 60)
     first_row = metadata.iloc[0]
     for col, val in first_row.items():
-        print(f"{col}: {val}")
+        #print(f"{col}: {val}")
+        pass
     
     print("=" * 60)
     print("Reading MTX file with annotations")
@@ -223,7 +88,16 @@ if __name__ == "__main__":
     if cell_names:
         print(f"First 5 cells: {cell_names[:5]}")
     
+    # Filter metadata to include only rows where 'cell_annotation' matches the loaded cell_names
+    if cell_names and 'cell_annotation' in metadata.columns:
+        filtered_metadata = metadata[metadata['cell_annotation'].isin(cell_names)].copy()
+        print(f"Filtered metadata shape: {filtered_metadata.shape}")
+    else:
+        filtered_metadata = metadata
+        print("Note: 'cell_annotation' column not found in metadata or cell_names unavailable.")
     # Example: Access specific gene or cell
+    print (f"Number of rows in filtered metadata: {len(filtered_metadata.index)}")
+
     if gene_names and cell_names:
         # Get expression of first gene across all cells
         for i in range(5):
@@ -267,7 +141,8 @@ if __name__ == "__main__":
         matrix=matrix,
         gene_names=gene_names,
         cell_names=cell_names,
-        transpose=True  # Matrix is genes × cells, need to transpose for AnnData
+        transpose=True,  # Matrix is genes × cells, need to transpose for AnnData
+        obs=filtered_metadata,
     )
     
     if adata is not None:
