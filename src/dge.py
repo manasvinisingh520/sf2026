@@ -143,43 +143,56 @@ class DGEAnalyzer:
         Returns:
         --------
         counts_df : pd.DataFrame
-            Count matrix with genes as rows, samples as columns
+            Count matrix with samples (cells) as rows, genes as columns
+            Index must match metadata_df index (cell names)
         metadata_df : pd.DataFrame
             Sample metadata with condition information
         """
         print("Preparing data from AnnData object...")
         
-        # Extract counts matrix (cells × genes)
-        # Convert to genes × cells (samples) format for DESeq2
+        # Extract counts matrix (cells × genes from AnnData)
+        # PyDESeq2's DeseqDataSet expects samples (cells) as rows, genes as columns
+        # The row index (cell names) must match metadata_df index
         if hasattr(self.data_file.X, 'toarray'):
             # Sparse matrix
-            counts_matrix = self.data_file.X.toarray().T  # Transpose: genes × cells
+            counts_matrix = self.data_file.X.toarray()  # Keep as cells × genes
         else:
             # Dense matrix
-            counts_matrix = self.data_file.X.T  # Transpose: genes × cells
+            counts_matrix = self.data_file.X  # Keep as cells × genes
         
-        # Create counts DataFrame with gene names as index
+        # Create counts DataFrame with cell names as index (rows), gene names as columns
         self.counts_df = pd.DataFrame(
             counts_matrix,
-            index=self.data_file.var_names,
-            columns=self.data_file.obs_names
+            index=self.data_file.obs_names,  # Cells as rows - matches metadata_df index
+            columns=self.data_file.var_names  # Genes as columns
         )
         
         # Extract metadata
         self.metadata_df = self.data_file.obs.copy()
         
-        # Filter lowly expressed genes
+        # Ensure indices match (important for PyDESeq2)
+        # Filter metadata to only include cells present in counts
+        self.metadata_df = self.metadata_df.loc[self.counts_df.index]
+        
+        # Filter lowly expressed genes (sum across samples/cells, axis=0)
         if self.min_counts > 0:
-            gene_sums = self.counts_df.sum(axis=1)
-            n_genes_before = len(self.counts_df)
-            self.counts_df = self.counts_df[gene_sums >= self.min_counts]
-            n_genes_after = len(self.counts_df)
+            gene_sums = self.counts_df.sum(axis=0)  # Sum across cells (rows)
+            n_genes_before = len(self.counts_df.columns)
+            self.counts_df = self.counts_df.loc[:, gene_sums >= self.min_counts]
+            n_genes_after = len(self.counts_df.columns)
             print(f"Filtered genes: {n_genes_before} -> {n_genes_after} "
                   f"(kept genes with >= {self.min_counts} total counts)")
         
-        print(f"Counts matrix shape: {self.counts_df.shape} (genes × cells)")
+        print(f"Counts matrix shape: {self.counts_df.shape} (cells × genes)")
         print(f"Metadata shape: {self.metadata_df.shape}")
         print(f"Condition '{self.condition}': {self.metadata_df[self.condition].value_counts().to_dict()}")
+        
+        # Verify indices match
+        if not self.counts_df.index.equals(self.metadata_df.index):
+            raise ValueError(
+                f"Index mismatch: counts_df index ({len(self.counts_df.index)} cells) "
+                f"does not match metadata_df index ({len(self.metadata_df.index)} cells)"
+            )
         
         return self.counts_df, self.metadata_df
     
@@ -431,44 +444,253 @@ if __name__ == "__main__":
     """
     Example usage of DGEAnalyzer class.
     
-    This example demonstrates how to use the class with an AnnData object.
+    This example demonstrates how to use the class with an AnnData object
+    loaded from MTX files (same as read_mtx_example.py).
+    
+    Usage:
+        python dge.py --group1 GROUP1 --group2 GROUP2 --region REGION
+        
+    Example:
+        python dge.py --group1 "Control" --group2 "Treatment" --region "EC"
     """
-    # Example: Load AnnData object (replace with your actual data)
-    # import scanpy as sc
-    # adata = sc.read_h5ad("your_data.h5ad")
+    import argparse
+    import os
     
-    # Or create a synthetic example
-    from anndata import AnnData
-    import numpy as np
+    # Set up argument parser
+    parser = argparse.ArgumentParser(
+        description='Run Differential Gene Expression (DGE) analysis using PyDESeq2',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Basic usage with two groups and region
+  python dge.py --group1 "Control" --group2 "Treatment" --region "EC"
+  
+  # Different regions: EC, ITG, PFC, V1, V2
+  python dge.py --group1 "A" --group2 "B" --region "V1"
+        """
+    )
     
-    # Create synthetic data for demonstration
-    n_cells = 100
-    n_genes = 1000
+    # Required arguments
+    parser.add_argument(
+        '--group1',
+        type=str,
+        required=True,
+        help='First group name for comparison (numerator in fold change)'
+    )
+    parser.add_argument(
+        '--group2',
+        type=str,
+        required=True,
+        help='Second group name for comparison (denominator in fold change)'
+    )
+    parser.add_argument(
+        '--region',
+        type=str,
+        required=True,
+        help='Region identifier to locate data files (e.g., EC, ITG, PFC, V1, V2)'
+    )
     
-    # Synthetic count matrix
-    counts = np.random.negative_binomial(n=10, p=0.3, size=(n_cells, n_genes))
+    # Parse arguments
+    args = parser.parse_args()
     
-    # Create metadata with conditions
-    metadata = pd.DataFrame({
-        'condition': ['A'] * (n_cells // 2) + ['B'] * (n_cells // 2),
-        'sample_id': [f'S{i}' for i in range(n_cells)]
-    })
+    # Import utilities for reading MTX files
+    from utils import read_mtx_file, create_anndata_object, read_excel_columns
+    
+    # Construct file paths based on region
+    base_dir = r"i:\sf2026\data"
+    date_prefix = "2025-11-16"  # Adjust if needed
+    region = args.region
+    
+    # Construct paths for region-specific files
+    mtx_path = os.path.join(base_dir, f"{date_prefix}_Astrocytes_{region}_matrix.mtx")
+    row_annotation_path = os.path.join(base_dir, f"{date_prefix}_Astrocytes_{region}_row_annotation.txt")
+    col_annotation_path = os.path.join(base_dir, f"{date_prefix}_Astrocytes_{region}_cell_annotation.txt")
+    metadata_path = os.path.join(base_dir, f"{date_prefix}_Astrocytes_metadata.xlsx")
+    
+    print("=" * 60)
+    print("Loading Data from MTX Files")
+    print("=" * 60)
+    print(f"Region: {region}")
+    print(f"Group 1: {args.group1}")
+    print(f"Group 2: {args.group2}")
+    print()
+    
+    # Load metadata
+    metadata = read_excel_columns(metadata_path, columns=['cell_annotation', "RIN", "Path..Group."])
+    print(f"Loaded metadata: {metadata.shape}")
+    
+    # Read the MTX file
+    matrix, gene_names, cell_names = read_mtx_file(
+        mtx_path=mtx_path,
+        row_annotation_path=row_annotation_path,
+        col_annotation_path=col_annotation_path,
+        transpose=False  # Matrix will be genes × cells
+    )
+    
+    print(f"Loaded matrix shape: {matrix.shape} (genes × cells)")
+    
+    # Filter metadata to include only rows where 'cell_annotation' matches the loaded cell_names
+    if cell_names and 'cell_annotation' in metadata.columns:
+        filtered_metadata = metadata[metadata['cell_annotation'].isin(cell_names)].copy()
+        print(f"Filtered metadata shape: {filtered_metadata.shape}")
+        # Align metadata index with cell_names for proper AnnData integration
+        # Set cell_annotation as index and reindex to match cell_names order
+        filtered_metadata = filtered_metadata.set_index('cell_annotation').reindex(cell_names)
+        print(f"Cells with metadata: {filtered_metadata.index.notna().sum()}/{len(cell_names)}")
+    else:
+        filtered_metadata = metadata
+        print("Note: 'cell_annotation' column not found in metadata or cell_names unavailable.")
+    # Example: Access specific gene or cell
+    print(f"Number of rows in filtered metadata: {len(filtered_metadata.index)}")
     
     # Create AnnData object
-    adata = AnnData(counts)
-    adata.obs = metadata
-    adata.var_names = [f'Gene_{i}' for i in range(n_genes)]
-    adata.obs_names = [f'Cell_{i}' for i in range(n_cells)]
+    adata = create_anndata_object(
+        matrix=matrix,
+        gene_names=gene_names,
+        cell_names=cell_names,
+        transpose=True,  # Matrix is genes × cells, transpose for AnnData (cells × genes)
+        obs=filtered_metadata,
+    )
     
-    # Create DGE analyzer with group comparisons
+    if adata is None:
+        raise ImportError("Failed to create AnnData object. Make sure anndata is installed.")
+    
+    print(f"\nAnnData object created: {adata.shape} (cells × genes)")
+    print(f"Available metadata columns: {list(adata.obs.columns)}")
+    
+    # Determine condition column (auto-detect Path..Group. or condition)
+    if 'Path..Group.' in adata.obs.columns:
+        condition_col = 'Path..Group.'
+    else:
+        raise ValueError(
+            f"No condition column found. Available columns: {list(adata.obs.columns)}"
+        )
+    
+    print(f"\nUsing '{condition_col}' as condition column")
+    unique_conditions = adata.obs[condition_col].dropna().unique()
+    print(f"Unique conditions in data: {list(unique_conditions)}")
+    print(f"Condition counts:\n{adata.obs[condition_col].value_counts()}")
+    
+    # Use parsed groups
+    group1 = args.group1
+    group2 = args.group2
+    
+    # Validate that specified groups exist in the data
+    if group1 not in unique_conditions:
+        raise ValueError(
+            f"Group '{group1}' not found in condition column '{condition_col}'. "
+        )
+    if group2 not in unique_conditions:
+        raise ValueError(
+            f"Group '{group2}' not found in condition column '{condition_col}'. "
+        )
+    
+    # Check group sizes
+    n_group1 = (adata.obs[condition_col] == group1).sum()
+    n_group2 = (adata.obs[condition_col] == group2).sum()
+    print(f"\nGroup sizes:")
+    print(f"  {group1}: {n_group1} cells")
+    print(f"  {group2}: {n_group2} cells")
+    
+    if n_group1 < 2 or n_group2 < 2:
+        raise ValueError(
+            f"Groups must have at least 2 samples each. "
+            f"Found {group1}: {n_group1}, {group2}: {n_group2}"
+        )
+    
+    # log2FC > 0 means higher in {group1}, log2FC < 0 means higher in {group2}
+    print(f"\nComparing: {group1} vs {group2}")
+    
+    # CRITICAL: Filter AnnData to only include cells from the two groups being compared
+    # This reduces memory usage significantly for large datasets
+    print(f"\nFiltering AnnData to only include groups {group1} and {group2}...")
+    mask = adata.obs[condition_col].isin([group1, group2])
+    n_before = adata.n_obs
+    adata_filtered = adata[mask].copy()
+    n_after = adata_filtered.n_obs
+    print(f"Filtered from {n_before:,} to {n_after:,} cells ({n_after/n_before*100:.1f}% of original)")
+    
+    # Check final group sizes
+    group_counts_filtered = adata_filtered.obs[condition_col].value_counts()
+    print(f"\nFinal group sizes after filtering:")
+    print(f"  {group1}: {group_counts_filtered.get(group1, 0):,} cells")
+    print(f"  {group2}: {group_counts_filtered.get(group2, 0):,} cells")
+    
+    # CRITICAL: Aggregate cells into pseudobulk samples if dataset is too large
+    # DESeq2 is designed for bulk RNA-seq with few samples (3-10 per condition)
+    # Single-cell data with thousands of cells causes memory errors
+    # Pseudobulk aggregation is standard practice for single-cell DGE analysis
+    max_cells_for_deseq2 = 500  # DESeq2 can't handle more than ~500 cells efficiently
+    
+    if True and n_after > max_cells_for_deseq2:
+        print(f"\n⚠️  WARNING: Dataset has {n_after:,} cells - too large for DESeq2!")
+        print(f"   DESeq2 will fail with memory errors above ~500 cells.")
+        print(f"   Aggregating cells into pseudobulk samples...")
+        
+        from scipy.sparse import csr_matrix
+        
+        # Target: ~5-10 pseudobulk samples per group (standard for bulk RNA-seq)
+        n_pseudobulk_per_group = 500
+        pseudobulk_data = []
+        pseudobulk_metadata = []
+        
+        for group_name in [group1, group2]:
+            group_mask = adata_filtered.obs[condition_col] == group_name
+            group_data = adata_filtered[group_mask]
+            n_cells_in_group = group_data.n_obs
+            
+            # Calculate how many cells per pseudobulk sample
+            cells_per_pseudobulk = max(1, n_cells_in_group // n_pseudobulk_per_group)
+            
+            # Create pseudobulk samples
+            for i in range(n_pseudobulk_per_group):
+                start_idx = i * cells_per_pseudobulk
+                end_idx = min((i + 1) * cells_per_pseudobulk, n_cells_in_group)
+                
+                if start_idx >= n_cells_in_group:
+                    break
+                    
+                sample_cells = group_data[start_idx:end_idx]
+                
+                # Sum counts across cells in this pseudobulk sample
+                if hasattr(sample_cells.X, 'toarray'):
+                    sample_counts = sample_cells.X.sum(axis=0).A1  # Sum across cells (axis=0)
+                else:
+                    sample_counts = sample_cells.X.sum(axis=0)
+                
+                pseudobulk_data.append(sample_counts)
+                pseudobulk_metadata.append({
+                    condition_col: group_name,
+                    '_sample_id': f"{group_name}_pb{i+1}"
+                })
+        
+        # Create new AnnData with pseudobulk samples
+        pseudobulk_matrix = np.array(pseudobulk_data)
+        pseudobulk_obs = pd.DataFrame(pseudobulk_metadata)
+        pseudobulk_obs.index = pseudobulk_obs['_sample_id']
+        
+        adata_filtered = AnnData(
+            X=csr_matrix(pseudobulk_matrix),
+            obs=pseudobulk_obs,
+            var=adata_filtered.var.copy()
+        )
+        
+        print(f"✅ Successfully aggregated to {adata_filtered.n_obs} pseudobulk samples")
+        print(f"   Sample distribution:")
+        print(adata_filtered.obs[condition_col].value_counts())
+        print(f"   Memory usage reduced by ~{n_after // adata_filtered.n_obs}x")
+    else:
+        print(f"\n✓ Dataset size ({n_after:,} cells) is acceptable for DESeq2.")
+    
+    # Create DGE analyzer with group comparisons (using filtered/aggregated data)
     dge = DGEAnalyzer(
-        data_file=adata,
-        condition="condition",
-        groups=[("B", "A")],  # Can add more comparisons: [("B", "A"), ("C", "A")]
+        data_file=adata_filtered,
+        condition=condition_col,
+        groups=[(group1, group2)],
         method="deseq2",
         threshold={'padj': 0.05, 'log2fc': 0.5},
         topK=10,
-        output_file="dge_results.csv",
+        output_file=f"dge_results_{region}_{group1}_vs_{group2}.csv",
         min_counts=10,
         n_cpus=2
     )
@@ -477,11 +699,13 @@ if __name__ == "__main__":
     results = dge.run_full_analysis()
     
     # Access results for each comparison
-    print("\nAccessing results:")
+    print("\n" + "=" * 60)
+    print("Results Summary")
+    print("=" * 60)
     for comparison_key, comparison_results in results.items():
         print(f"\nComparison: {comparison_key}")
         print(f"Total genes tested: {len(comparison_results['results'])}")
         print(f"Significant DEGs: {len(comparison_results['significant_genes'])}")
-        print(f"Top {dge.topK} genes:")
+        print(f"\nTop {dge.topK} genes:")
         print(comparison_results['top_genes'])
 
