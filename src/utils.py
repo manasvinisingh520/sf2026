@@ -47,9 +47,7 @@ def read_mtx_file(mtx_path, row_annotation_path=None, col_annotation_path=None,
     # Read the .mtx file using scipy
     # This returns a COO (Coordinate) format sparse matrix
     matrix = scipy.io.mmread(mtx_path)
-    
     print(f"Loaded matrix shape: {matrix.shape}")
-    print(f"Matrix format: {matrix.format}")
     print(f"Number of non-zero entries: {matrix.nnz:,}")
     print(f"Sparsity: {(1 - matrix.nnz / (matrix.shape[0] * matrix.shape[1])) * 100:.2f}%")
     
