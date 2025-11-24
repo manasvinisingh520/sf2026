@@ -55,6 +55,25 @@ In DESeq2, the Wald test is used to test whether genes are **differentially expr
 
 ### The Model
 
+Step-by-step breakdown Negative Binomial GLM fitting: DESeq2 first
+fits a Negative Binomial GLM for each gene to model the raw read
+counts, taking into account library size differences and biological
+variability.Coefficient and standard error estimation: The model
+outputs a log2 fold change (LFC) estimate (a coefficient) and a
+standard error for that coefficient for each gene.Prior shrinkage:
+DESeq2 uses a shrinkage approach to improve coefficient estimates,
+especially for genes with low counts, by moderating the variance using
+a prior distribution.Wald test statistic calculation: The Wald test
+statistic is calculated by dividing the shrunken LFC estimate by its
+standard error, which produces a
+z-statistic.\(z=\frac{\text{LFC}}{\text{standard\ error}}\)P-value
+computation: The calculated z-statistic is compared to a standard
+normal distribution to find the probability of obtaining a test
+statistic at least as extreme as the observed value. This probability
+is the p-value.Multiple testing correction: Finally, p-values are
+corrected for multiple testing using the Benjamini-Hochberg method to
+control the false discovery rate. 
+
 DESeq2 fits a **negative binomial GLM** for each gene:
 
 ```
