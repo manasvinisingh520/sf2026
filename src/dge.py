@@ -349,21 +349,36 @@ class DGEAnalyzer:
                 print(f"    Upregulated ({group1} > {group2}): {upregulated}")
                 print(f"    Downregulated ({group1} < {group2}): {downregulated}")
             
-            # Get top genes
-            genes_df = significant_genes if len(significant_genes) > 0 else results
-            sort_by = 'padj'
-            ascending = True if sort_by in ['padj', 'pvalue'] else False
-            top_genes = genes_df.sort_values(sort_by, ascending=ascending).head(self.topK)
+            # Get genes with padj < 0.05 (regardless of log2FC threshold)
+            # Filter out NaN values first
+            padj_mask = (results['padj'] < 0.05) & (results['padj'].notna())
+            genes_padj_005 = results[padj_mask].copy()
+            if len(genes_padj_005) > 0:
+                genes_padj_005 = genes_padj_005.sort_values('padj', ascending=True)
             
-            print(f"\nTop {self.topK} genes sorted by {sort_by}:")
-            print(top_genes[['log2FoldChange', 'padj', 'baseMean']].head(self.topK))
+            print(f"\nGenes with padj < 0.05: {len(genes_padj_005)}")
+            if len(genes_padj_005) > 0:
+                print("\nAll genes with padj < 0.05:")
+                print(genes_padj_005[['log2FoldChange', 'padj', 'baseMean']])
+            else:
+                print("  No genes found with padj < 0.05")
+            
+            # Keep top_genes for backward compatibility (first topK from padj < 0.05)
+            top_genes = genes_padj_005.head(self.topK) if len(genes_padj_005) > 0 else pd.DataFrame()
             
             # Save results if requested
             if save:
                 if filename_prefix is None:
                     # Extract base filename without extension
                     base = self.output_file.rsplit('.', 1)[0] if '.' in self.output_file else self.output_file
-                    filename = f"{base}_{pair_key}.csv"
+                    # Only append pair_key if it's not already in the filename
+                    # This prevents duplication when output_file already contains comparison info
+                    if pair_key in base:
+                        # pair_key already in filename, just use it as-is
+                        filename = f"{base}.csv"
+                    else:
+                        # pair_key not in filename, append it for multi-comparison support
+                        filename = f"{base}_{pair_key}.csv"
                 else:
                     filename = f"{filename_prefix}_{pair_key}.csv"
                 
@@ -375,6 +390,7 @@ class DGEAnalyzer:
                 'stat_res': stat_res,
                 'results': results,
                 'significant_genes': significant_genes,
+                'genes_padj_005': genes_padj_005,
                 'top_genes': top_genes
             }
         
@@ -515,8 +531,25 @@ Examples:
     print(f"Group 2: {args.group2}")
     print()
     
-    # Load metadata
-    metadata = read_excel_columns(metadata_path, columns=['cell_annotation', "RIN", "Path..Group."])
+    # Map region to tab index (0-based)
+    region_to_tab = {
+        "EC": 0,      # First tab (default)
+        "ITG": 1,     # Second tab (BA 20)
+        "PFC": 2,     # Third tab (BA 21)
+        "V2": 3,      # Fourth tab
+        "V1": 4,      # Fifth tab
+    }
+    
+    tab_index = region_to_tab.get(region)
+    if tab_index is None:
+        raise ValueError(f"Region '{region}' not mapped to a tab index. Available regions: {list(region_to_tab.keys())}")
+    
+    print(f"Loading metadata from tab index {tab_index} for region '{region}'")
+    
+    # Load metadata (include SampleName for patient-based pseudobulk aggregation, and filtering columns)
+    metadata = read_excel_columns(metadata_path, columns=['cell_annotation', "RIN", "Path..Group.", "SampleName", 
+                                                          "Median.UMI.Counts.per.Cell", "percent.mito"],
+                                  sheet_name=tab_index)
     print(f"Loaded metadata: {metadata.shape}")
     
     # Read the MTX file
@@ -532,7 +565,7 @@ Examples:
     # Filter metadata to include only rows where 'cell_annotation' matches the loaded cell_names
     if cell_names and 'cell_annotation' in metadata.columns:
         filtered_metadata = metadata[metadata['cell_annotation'].isin(cell_names)].copy()
-        print(f"Filtered metadata shape: {filtered_metadata.shape}")
+        print(f"Filtered metadata shape (after cell_annotation match): {filtered_metadata.shape}")
         # Align metadata index with cell_names for proper AnnData integration
         # Set cell_annotation as index and reindex to match cell_names order
         filtered_metadata = filtered_metadata.set_index('cell_annotation').reindex(cell_names)
@@ -540,8 +573,50 @@ Examples:
     else:
         filtered_metadata = metadata
         print("Note: 'cell_annotation' column not found in metadata or cell_names unavailable.")
-    # Example: Access specific gene or cell
-    print(f"Number of rows in filtered metadata: {len(filtered_metadata.index)}")
+    
+    # Apply quality filters: UMI > 200 and mito > 0.15
+    n_before_filter = len(filtered_metadata)
+    
+    # Initialize masks as all True
+    umi_mask = pd.Series([True] * len(filtered_metadata), index=filtered_metadata.index)
+    mito_mask = pd.Series([True] * len(filtered_metadata), index=filtered_metadata.index)
+    
+    if 'Median.UMI.Counts.per.Cell' in filtered_metadata.columns:
+        umi_mask = (filtered_metadata['Median.UMI.Counts.per.Cell'] > 200).fillna(False)
+        print(f"\nFiltering by UMI count > 200:")
+        print(f"  Before: {n_before_filter} cells")
+        print(f"  After: {umi_mask.sum()} cells ({umi_mask.sum()/n_before_filter*100:.1f}%)")
+    else:
+        print("Warning: 'Median.UMI.Counts.per.Cell' column not found in metadata. Skipping UMI filter.")
+    
+    if 'percent.mito' in filtered_metadata.columns:
+        mito_mask = (filtered_metadata['percent.mito'] < 0.15).fillna(False)
+        n_after_umi = umi_mask.sum()
+        print(f"\nFiltering by mito content < 0.15:")
+        print(f"  Before: {n_after_umi} cells")
+        n_after_both = (umi_mask & mito_mask).sum()
+        print(f"  After: {n_after_both} cells ({n_after_both/n_after_umi*100:.1f}%)" if n_after_umi > 0 else "  After: 0 cells")
+    else:
+        print("Warning: 'percent.mito' column not found in metadata. Skipping mito filter.")
+    
+    # Apply both filters (keep cells that pass BOTH filters)
+    combined_mask = umi_mask & mito_mask
+    filtered_metadata = filtered_metadata[combined_mask].copy()
+    
+    print(f"\nTotal filtered metadata: {len(filtered_metadata)} cells (kept {len(filtered_metadata)/n_before_filter*100:.1f}% of original)")
+    
+    # Now we need to filter the matrix and cell_names to match the filtered metadata
+    if len(filtered_metadata) > 0:
+        # Get the cell names that passed the filter
+        cells_to_keep = filtered_metadata.index.tolist()
+        # Filter cell_names and matrix accordingly
+        cell_indices_to_keep = [i for i, name in enumerate(cell_names) if name in cells_to_keep]
+        cell_names = [cell_names[i] for i in cell_indices_to_keep]
+        # Filter matrix columns (cells are columns in the loaded matrix: genes × cells)
+        matrix = matrix[:, cell_indices_to_keep]
+        print(f"Filtered matrix shape: {matrix.shape} (genes × cells)")
+    else:
+        raise ValueError("No cells passed the quality filters! Check your filter thresholds.")
     
     # Create AnnData object
     adata = create_anndata_object(
@@ -621,16 +696,16 @@ Examples:
     # Single-cell data with thousands of cells causes memory errors
     # Pseudobulk aggregation is standard practice for single-cell DGE analysis
     max_cells_for_deseq2 = 500  # DESeq2 can't handle more than ~500 cells efficiently
+    n_bins_per_patient = 1000  # Number of bins to split each patient into (hardcode this value)
     
     if True and n_after > max_cells_for_deseq2:
-        print(f"\n⚠️  WARNING: Dataset has {n_after:,} cells - too large for DESeq2!")
+        print(f"\n WARNING: Dataset has {n_after:,} cells - too large for DESeq2!")
         print(f"   DESeq2 will fail with memory errors above ~500 cells.")
         print(f"   Aggregating cells into pseudobulk samples...")
         
         from scipy.sparse import csr_matrix
         
         # Target: ~5-10 pseudobulk samples per group (standard for bulk RNA-seq)
-        n_pseudobulk_per_group = 500
         pseudobulk_data = []
         pseudobulk_metadata = []
         
@@ -639,30 +714,47 @@ Examples:
             group_data = adata_filtered[group_mask]
             n_cells_in_group = group_data.n_obs
             
-            # Calculate how many cells per pseudobulk sample
-            cells_per_pseudobulk = max(1, n_cells_in_group // n_pseudobulk_per_group)
+            # Get unique patients and their cell counts
+            unique_patients = group_data.obs['SampleName'].dropna().unique()
+            print(f"   Group {group_name}: {len(unique_patients)} unique patients, {n_cells_in_group:,} total cells")
             
-            # Create pseudobulk samples
-            for i in range(n_pseudobulk_per_group):
-                start_idx = i * cells_per_pseudobulk
-                end_idx = min((i + 1) * cells_per_pseudobulk, n_cells_in_group)
+            # Process each patient
+            for patient_name in unique_patients:
+                patient_mask = group_data.obs['SampleName'] == patient_name
+                patient_cells = group_data[patient_mask]
+                n_cells_per_patient = patient_cells.n_obs
                 
-                if start_idx >= n_cells_in_group:
-                    break
+                if n_cells_per_patient == 0:
+                    continue
+                
+                print(f"      Patient {patient_name}: {n_cells_per_patient:,} cells -> splitting into {n_bins_per_patient} bin(s)")
+                
+                # Calculate cells per bin for this patient
+                cells_per_bin = max(1, n_cells_per_patient // n_bins_per_patient)
+                
+                # Split patient's cells into bins
+                for bin_idx in range(n_bins_per_patient):
+                    start_idx = bin_idx * cells_per_bin
+                    end_idx = min((bin_idx + 1) * cells_per_bin, n_cells_per_patient)
                     
-                sample_cells = group_data[start_idx:end_idx]
-                
-                # Sum counts across cells in this pseudobulk sample
-                if hasattr(sample_cells.X, 'toarray'):
-                    sample_counts = sample_cells.X.sum(axis=0).A1  # Sum across cells (axis=0)
-                else:
-                    sample_counts = sample_cells.X.sum(axis=0)
-                
-                pseudobulk_data.append(sample_counts)
-                pseudobulk_metadata.append({
-                    condition_col: group_name,
-                    '_sample_id': f"{group_name}_pb{i+1}"
-                })
+                    if start_idx >= n_cells_per_patient:
+                        break
+                    
+                    # Get subset of cells for this bin
+                    patient_cells_subset = patient_cells[start_idx:end_idx]
+                    
+                    # Sum counts across cells in this bin
+                    if hasattr(patient_cells_subset.X, 'toarray'):
+                        bin_counts = patient_cells_subset.X.sum(axis=0).A1  # Sum across cells (axis=0)
+                    else:
+                        bin_counts = patient_cells_subset.X.sum(axis=0)
+                    
+                    pseudobulk_data.append(bin_counts)
+                    pseudobulk_metadata.append({
+                        condition_col: group_name,
+                        'SampleName': patient_name,
+                        '_sample_id': f"{group_name}_{patient_name}_bin{bin_idx+1}"
+                    })
         
         # Create new AnnData with pseudobulk samples
         pseudobulk_matrix = np.array(pseudobulk_data)
@@ -675,7 +767,7 @@ Examples:
             var=adata_filtered.var.copy()
         )
         
-        print(f"✅ Successfully aggregated to {adata_filtered.n_obs} pseudobulk samples")
+        print(f"Successfully aggregated to {adata_filtered.n_obs} pseudobulk samples")
         print(f"   Sample distribution:")
         print(adata_filtered.obs[condition_col].value_counts())
         print(f"   Memory usage reduced by ~{n_after // adata_filtered.n_obs}x")
@@ -690,7 +782,7 @@ Examples:
         method="deseq2",
         threshold={'padj': 0.05, 'log2fc': 0.5},
         topK=10,
-        output_file=f"dge_results_{region}_{group1}_vs_{group2}.csv",
+        output_file=f"dge_results_{region}_{group1}_vs_{group2}_bins{n_bins_per_patient}.csv",
         min_counts=10,
         n_cpus=2
     )
@@ -705,7 +797,14 @@ Examples:
     for comparison_key, comparison_results in results.items():
         print(f"\nComparison: {comparison_key}")
         print(f"Total genes tested: {len(comparison_results['results'])}")
-        print(f"Significant DEGs: {len(comparison_results['significant_genes'])}")
-        print(f"\nTop {dge.topK} genes:")
-        print(comparison_results['top_genes'])
+        print(f"Significant DEGs (padj < 0.05, |log2FC| > 0.5): {len(comparison_results['significant_genes'])}")
+        
+        # Get genes with padj < 0.05
+        genes_padj_005 = comparison_results.get('genes_padj_005', pd.DataFrame())
+        print(f"\nGenes with padj < 0.05: {len(genes_padj_005)}")
+        if len(genes_padj_005) > 0:
+            print("\nAll genes with padj < 0.05:")
+            print(genes_padj_005[['log2FoldChange', 'padj', 'baseMean']])
+        else:
+            print("  No genes found with padj < 0.05")
 
