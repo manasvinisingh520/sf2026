@@ -4,6 +4,14 @@ data/
 # Exclude docs directory
 docs/
 
+# results
+dge1/*
+dge2/*
+dge3/*
+dge4/*
+
+logs/*
+
 # Python
 __pycache__/
 *.py[cod]

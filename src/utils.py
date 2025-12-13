@@ -10,7 +10,7 @@ This module provides helper functions for:
 import scipy.io
 from scipy.sparse import csr_matrix
 import pandas as pd
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Union
 
 
 def read_mtx_file(mtx_path, row_annotation_path=None, col_annotation_path=None, 
@@ -103,7 +103,7 @@ def read_mtx_file(mtx_path, row_annotation_path=None, col_annotation_path=None,
 def read_excel_columns(
     file_path: str,
     columns: Optional[List[str]] = None,
-    sheet_name: Optional[str | int] = 0,
+    sheet_name: Optional[Union[str, int]] = 0,
     dtype: Optional[Dict[str, str]] = None,
     engine: Optional[str] = None,
     use_progress: bool = True
