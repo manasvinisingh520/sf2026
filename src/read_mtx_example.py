@@ -14,7 +14,7 @@ import pandas as pd
 import numpy as np
 import random
 
-from utils import read_mtx_file, create_anndata_object, read_excel_columns
+from utils import read_mtx_file, create_anndata_object, read_excel_columns, filter_anndata_object
 
 
 def convert_to_dense(matrix, subset_genes=None, subset_cells=None):
@@ -170,3 +170,10 @@ if __name__ == "__main__":
         print(f"  Variables (genes): {adata.n_vars:,}")
         print(f"  Observations (cells): {adata.n_obs:,}")
 
+
+    adata = filter_anndata_object(adata, min_genes=None, min_cells=3, min_counts=1000, max_counts=None)
+    if adata is not None:
+        print(f"AnnData object after filtering!")
+        print(f"  Shape: {adata.shape}")
+        print(f"  Variables (genes): {adata.n_vars:,}")
+        print(f"  Observations (cells): {adata.n_obs:,}")
