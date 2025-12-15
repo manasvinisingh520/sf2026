@@ -259,3 +259,29 @@ def create_anndata_object(matrix, gene_names=None, cell_names=None, obs=None, tr
         print("anndata package not installed. Install with: pip install anndata scanpy")
         return None
 
+def filter_anndata_object(adata, min_genes=200, min_cells=3, min_counts=None, 
+                          max_counts=None):
+    """
+    Filter an AnnData object based on the number of genes and cells.
+    
+    Parameters:
+    -----------
+    adata : anndata.AnnData
+        AnnData object to filter
+    min_genes : int, default=200
+        Minimum number of genes detected per cell
+    min_cells : int, default=3
+        Minimum number of cells expressing each gene
+    min_counts : int, optional
+        Minimum total counts (UMIs) per cell
+    max_counts : int, optional
+        Maximum total counts (UMIs) per cell    
+    Returns:
+    --------
+    adata : anndata.AnnData
+        Filtered AnnData object
+    """
+    import scanpy as sc
+    sc.pp.filter_cells(adata, min_genes=min_genes, min_counts=min_counts, max_counts=max_counts)
+    sc.pp.filter_genes(adata, min_cells=min_cells)
+    return adata
