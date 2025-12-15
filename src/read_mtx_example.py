@@ -14,7 +14,7 @@ import pandas as pd
 import numpy as np
 import random
 
-from utils import read_mtx_file, create_anndata_object, read_excel_columns
+from utils import read_mtx_file, create_anndata_object, read_excel_columns, filter_anndata_object
 
 
 def convert_to_dense(matrix, subset_genes=None, subset_cells=None):
@@ -47,12 +47,12 @@ def convert_to_dense(matrix, subset_genes=None, subset_cells=None):
 # Example usage
 if __name__ == "__main__":
     # Paths to your files
-    mtx_path = r"i:\sf2026\data\2025-10-22_Astrocytes_EC_matrix.mtx"
-    row_annotation_path = r"i:\sf2026\data\2025-10-22_Astrocytes_EC_row_annotation.txt" # genes.tsv
-    col_annotation_path = r"i:\sf2026\data\2025-10-22_Astrocytes_EC_cell_annotation.txt" # cells.tsv
-    metadata_path = r"i:\sf2026\data\2025-11-16_Astrocytes_metadata.xlsx" # metadata.xlsx
+    mtx_path = r"../data/2025-11-16_Astrocytes_EC_matrix.mtx"
+    row_annotation_path = r"../data/2025-11-16_Astrocytes_EC_row_annotation.txt" # genes.tsv
+    col_annotation_path = r"../data/2025-11-16_Astrocytes_EC_cell_annotation.txt" # cells.tsv
+    metadata_path = r"../data/2025-11-16_Astrocytes_metadata.xlsx" # metadata.xlsx
     #metadata = pd.read_csv(metadata_path, low_memory=False)
-    metadata = read_excel_columns(metadata_path, columns=['cell_annotation', "RIN", "Path..Group."])
+    metadata = read_excel_columns(metadata_path, columns=['cell_annotation', "RIN", "Path..Group.", "Median.UMI.Counts.per.Cell", "percent.mito", "Total.Genes.Detected", "Median.Genes.per.Cell"])
 
     # Print all column names and values from the first row (index 0) of the metadata DataFrame
     print(f"Number of rows in metadata: {len(metadata.index)}")
@@ -61,8 +61,27 @@ if __name__ == "__main__":
     print("=" * 60)
     first_row = metadata.iloc[0]
     for col, val in first_row.items():
-        #print(f"{col}: {val}")
+        print(f"{col}: {val}")
         pass
+    
+    # Find row based on specific cell_annotation
+    print("\n" + "=" * 60)
+    print("Searching for specific cell:")
+    print("=" * 60)
+    target_cell = 'AAACCCACAGGTGTTT-1_6289-MW-0031'
+    if 'cell_annotation' in metadata.columns:
+        matching_rows = metadata[metadata['cell_annotation'] == target_cell]
+        if len(matching_rows) > 0:
+            print(f"Found {len(matching_rows)} row(s) with cell_annotation = '{target_cell}':")
+            print("\nRow details:")
+            for idx, row in matching_rows.iterrows():
+                print(f"\nRow index: {idx}")
+                for col, val in row.items():
+                    print(f"  {col}: {val}")
+        else:
+            print(f"No rows found with cell_annotation = '{target_cell}'")
+    else:
+        print("'cell_annotation' column not found in metadata")
     
     print("=" * 60)
     print("Reading MTX file with annotations")
@@ -89,7 +108,7 @@ if __name__ == "__main__":
         print(f"First 5 cells: {cell_names[:5]}")
     
     # Filter metadata to include only rows where 'cell_annotation' matches the loaded cell_names
-    if cell_names and 'cell_annotation' in metadata.columns:
+    if 0 and cell_names and 'cell_annotation' in metadata.columns:
         filtered_metadata = metadata[metadata['cell_annotation'].isin(cell_names)].copy()
         print(f"Filtered metadata shape: {filtered_metadata.shape}")
     else:
@@ -151,3 +170,10 @@ if __name__ == "__main__":
         print(f"  Variables (genes): {adata.n_vars:,}")
         print(f"  Observations (cells): {adata.n_obs:,}")
 
+
+    adata = filter_anndata_object(adata, min_genes=None, min_cells=3, min_counts=1000, max_counts=None)
+    if adata is not None:
+        print(f"AnnData object after filtering!")
+        print(f"  Shape: {adata.shape}")
+        print(f"  Variables (genes): {adata.n_vars:,}")
+        print(f"  Observations (cells): {adata.n_obs:,}")
