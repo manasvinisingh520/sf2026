@@ -11,6 +11,7 @@ dge3/*
 dge4/*
 
 logs/*
+results/*
 
 # Python
 __pycache__/

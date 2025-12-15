@@ -473,38 +473,24 @@ if __name__ == "__main__":
     import os
     
     # Set up argument parser
-    parser = argparse.ArgumentParser(
-        description='Run Differential Gene Expression (DGE) analysis using PyDESeq2',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+    epilog = """
 Examples:
   # Basic usage with two groups and region
   python dge.py --group1 "Control" --group2 "Treatment" --region "EC"
   
   # Different regions: EC, ITG, PFC, V1, V2
   python dge.py --group1 "A" --group2 "B" --region "V1"
-        """
+    """
+    parser = argparse.ArgumentParser(
+        description='Run Differential Gene Expression (DGE) analysis using PyDESeq2',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=epilog
     )
     
     # Required arguments
-    parser.add_argument(
-        '--group1',
-        type=str,
-        required=True,
-        help='First group name for comparison (numerator in fold change)'
-    )
-    parser.add_argument(
-        '--group2',
-        type=str,
-        required=True,
-        help='Second group name for comparison (denominator in fold change)'
-    )
-    parser.add_argument(
-        '--region',
-        type=str,
-        required=True,
-        help='Region identifier to locate data files (e.g., EC, ITG, PFC, V1, V2)'
-    )
+    parser.add_argument('--group1', type=str, required=True, help='First group name')
+    parser.add_argument('--group2', type=str, required=True, help='Second group name')
+    parser.add_argument('--region', type=str, required=True, help='Region identifier to locate data files (e.g., EC, ITG, PFC, V1, V2)')
     
     # Parse arguments
     args = parser.parse_args()
@@ -513,6 +499,7 @@ Examples:
     from utils import read_mtx_file, create_anndata_object, read_excel_columns
     
     # Construct file paths based on region
+    # FIXME: Maybe create global configuration file for data paths?
     base_dir = r"i:\sf2026\data"
     date_prefix = "2025-11-16"  # Adjust if needed
     region = args.region

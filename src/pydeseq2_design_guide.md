@@ -218,17 +218,19 @@ design = "~patient + condition"
 contrast = ["condition", "after", "before"]
 ```
 
-### Pattern 4: Multiple Conditions
+### Pattern 4: Multiple Conditions (3+ Groups)
 ```python
 # Metadata
 metadata = pd.DataFrame({
-    'condition': ['control', 'low_dose', 'high_dose']
+    'sample': ['S1', 'S2', 'S3', 'S4', 'S5', 'S6'],
+    'condition': ['control', 'low_dose', 'high_dose'],  # 3+ levels
+    # or severity: ['1', '2', '3', '4']  # 4+ levels
 })
 
-# Design
+# Design (works with 2, 3, 4, or any number of levels!)
 design = "~condition"
 
-# Multiple comparisons
+# Multiple pairwise comparisons
 # control vs low_dose
 contrast1 = ["condition", "low_dose", "control"]
 
@@ -237,7 +239,72 @@ contrast2 = ["condition", "high_dose", "control"]
 
 # low_dose vs high_dose
 contrast3 = ["condition", "high_dose", "low_dose"]
+
+# For severity 1-4, you could compare:
+# 4 vs 1 (most vs least)
+# 3 vs 1, 2 vs 1
+# 4 vs 2, 4 vs 3
+# Any pairwise comparison is possible!
 ```
+
+**Note**: DESeq2 handles **any number of categorical levels**, not just binary comparisons. The design formula `~condition` works identically whether you have 2, 3, 4, or more groups. You specify which groups to compare in the `contrast` parameter.
+
+### Pattern 5: Multi-Level Categorical (Ordinal/Non-Ordinal)
+```python
+# Metadata with multiple severity levels (1-4)
+metadata = pd.DataFrame({
+    'sample': ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8'],
+    'severity': ['1', '1', '2', '2', '3', '3', '4', '4'],  # 4 levels as strings
+    # or numeric (will be treated as categorical if design uses it as factor):
+    # 'severity': [1, 1, 2, 2, 3, 3, 4, 4]
+})
+
+# Design (same as binary - works with any number of levels!)
+design = "~severity"
+
+# Compare any two levels using contrasts
+# Severity 4 vs 1 (most severe vs least)
+contrast1 = ["severity", "4", "1"]
+
+# Adjacent levels: 2 vs 1
+contrast2 = ["severity", "2", "1"]
+
+# High vs Low: 4 vs 2
+contrast3 = ["severity", "4", "2"]
+
+# All possible pairwise comparisons can be done
+```
+
+**Notes**:
+- DESeq2 supports **any number of levels** (2, 3, 4, 5+)
+- You can compare **any two levels** using contrasts
+- Ensure sufficient samples per level (≥3-5 recommended)
+- For multiple comparisons, adjust p-values (DESeq2 does FDR correction per contrast)
+
+### Pattern 6: Continuous Ordinal (Linear Trend)
+```python
+# Metadata with numeric severity (testing linear trend)
+metadata = pd.DataFrame({
+    'sample': ['S1', 'S2', 'S3', 'S4'],
+    'severity': [1, 2, 3, 4],  # Numeric values (continuous)
+})
+
+# Design with continuous variable
+design = "~severity"  # Tests linear relationship
+
+# Model: expression = β₀ + β₁ × severity
+# β₁ = log2 fold change per unit increase in severity
+# Positive β₁ = increases with severity
+# Negative β₁ = decreases with severity
+```
+
+**When to use**:
+- **Categorical (Pattern 5)**: When levels are distinct categories, want flexible pairwise comparisons
+- **Continuous (Pattern 6)**: When you believe there's a linear trend, want simpler model
+
+**Example with disease severity 1-4**:
+- If severity levels are **distinct disease stages** → Use **categorical** (Pattern 5)
+- If severity represents **progressive worsening** and you expect linear changes → Use **continuous** (Pattern 6)
 
 ## Important Notes
 
@@ -325,12 +392,13 @@ stat_res = DeseqStats(
 
 | Formula | Meaning |
 |---------|---------|
-| `~condition` | Simple two-group comparison |
+| `~condition` | Simple two-group comparison (or multi-level: 3+ groups) |
 | `~batch + condition` | Control for batch effects |
 | `~condition * treatment` | Main effects + interaction |
 | `~condition + treatment + condition:treatment` | Same as above (explicit) |
 | `~age + condition` | Control for continuous covariate |
 | `~patient + condition` | Paired design (control for patient) |
+| `~severity` | Multi-level categorical (3+ groups) or continuous ordinal |
 | `~(A + B):C` | Interactions of C with A and B |
 | `~0 + condition` | No intercept (rarely used) |
 
@@ -342,6 +410,12 @@ stat_res = DeseqStats(
 - **Reference level** is set in the contrast, not the design
 - **Add terms with `+`**, interactions with `:`
 - **Order matters** when you have multiple terms
+- **Multi-level support**: Condition can have 2, 3, 4, or any number of levels (not just binary)
+  - Compare any two levels using contrasts
+  - For ordinal data, can treat as categorical (flexible) or continuous (linear trend)
 
-For your use case with `design="~condition"`, you're simply comparing gene expression between different conditions (e.g., control vs treated, disease vs healthy).
+For your use case:
+- **Binary**: `design="~condition"` compares two groups (e.g., control vs treated)
+- **Multi-level**: `design="~condition"` with 3+ groups allows comparing any pair via contrasts
+- **Continuous**: `design="~severity"` with numeric values tests linear trend
 

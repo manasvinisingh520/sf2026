@@ -175,7 +175,7 @@ def main():
     
     # Determine base directory based on version (dge1, dge2, dge3, dge4)
     version = args.version
-    base_dir = Path(rf"I:\sf2026\dge{version}")
+    base_dir = Path(rf"I:\sf2026\results\dge{version}")
     filename = f"dge_results_{args.region}_{args.cond1}_vs_{args.cond2}_bins{args.bins}.csv"
     input_file = base_dir / filename
     
