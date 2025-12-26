@@ -5,12 +5,16 @@ This module provides helper functions for:
 - Reading .mtx files (Matrix Market format)
 - Creating AnnData objects from matrices
 - Reading Excel files into pandas DataFrames
+- Filtering cells based on metadata criteria
+- Getting file paths for region-specific data
 """
 
 import scipy.io
 from scipy.sparse import csr_matrix
 import pandas as pd
-from typing import Optional, List, Dict, Union
+import numpy as np
+from pathlib import Path
+from typing import Optional, List, Dict, Union, Tuple
 
 
 def read_mtx_file(mtx_path, row_annotation_path=None, col_annotation_path=None, 
@@ -260,7 +264,7 @@ def create_anndata_object(matrix, gene_names=None, cell_names=None, obs=None, tr
         return None
 
 def filter_anndata_object(adata, min_genes=200, min_cells=3, min_counts=None, 
-                          max_counts=None):
+                          max_counts=None, mito_max=None):
     """
     Filter an AnnData object based on the number of genes and cells.
     
@@ -284,4 +288,129 @@ def filter_anndata_object(adata, min_genes=200, min_cells=3, min_counts=None,
     import scanpy as sc
     sc.pp.filter_cells(adata, min_genes=min_genes, min_counts=min_counts, max_counts=max_counts)
     sc.pp.filter_genes(adata, min_cells=min_cells)
+    if mito_max is not None:
+        mask = (adata.obs['percent.mito'] < mito_max).fillna(False)
+        adata = adata[mask].copy()
+    else:
+        print("Warning: mito_max is not set. Skipping mito filter.")
+
     return adata
+
+
+def get_region_file_paths(region, data_dir="data", base_prefix="2025-10-22_Astrocytes_{region}"):
+    """
+    Get file paths for region-specific matrix, row, and column annotation files.
+    
+    Parameters:
+    -----------
+    region : str
+        Region name (e.g., 'EC', 'ITG', 'PFC', 'V1', 'V2')
+    data_dir : str or Path, default="data"
+        Base directory containing region files
+    base_prefix : str, default="2025-10-22_Astrocytes_{region}"
+        File naming pattern with {region} placeholder
+    
+    Returns:
+    --------
+    mtx_path : Path
+        Path to matrix.mtx file
+    row_path : Path
+        Path to row_annotation.txt file
+    col_path : Path
+        Path to cell_annotation.txt file
+    """
+    data_dir = Path(data_dir)
+    prefix = base_prefix.format(region=region)
+    mtx_path = (data_dir / f"{prefix}_matrix.mtx").resolve()
+    row_path = (data_dir / f"{prefix}_row_annotation.txt").resolve()
+    col_path = (data_dir / f"{prefix}_cell_annotation.txt").resolve()
+    return mtx_path, row_path, col_path
+
+
+def get_dge_results_dir(version: int, base_dir: str = None) -> Path:
+    """
+    Get the path to DGE results directory for a given version.
+    
+    Parameters:
+    -----------
+    version : int
+        DGE version (1, 2, 3, or 4)
+    base_dir : str, optional
+        Base directory for results. If None, uses current working directory.
+    
+    Returns:
+    --------
+    results_dir : Path
+        Path to the DGE results directory (e.g., results/dge4)
+    """
+    if base_dir is None:
+        from pathlib import Path
+        base_dir = Path.cwd()
+    else:
+        base_dir = Path(base_dir)
+    
+    return base_dir / "results" / f"dge{version}"
+
+
+def filter_cells(matrix, cell_names, metadata, mito_max=15.0):
+    """
+    Filter cells based on mitochondrial percentage threshold.
+    
+    Parameters:
+    -----------
+    matrix : scipy.sparse matrix
+        Expression matrix (genes × cells)
+    cell_names : list
+        List of cell names/barcodes
+    metadata : pandas.DataFrame
+        Metadata DataFrame with 'cell_annotation' and 'percent.mito' columns
+    mito_max : float, default=15.0
+        Maximum mitochondrial percentage threshold
+    
+    Returns:
+    --------
+    filtered_matrix : scipy.sparse matrix
+        Filtered expression matrix
+    filtered_cell_names : list
+        List of cell names that passed filters
+    filtered_metadata : pandas.DataFrame
+        Filtered metadata DataFrame
+    """
+    # Ensure cell_names matches matrix columns
+    n_cols = matrix.shape[1]
+    if len(cell_names) != n_cols:
+        print(f"  Warning: cell_names length ({len(cell_names)}) != matrix columns ({n_cols})")
+        cell_names = cell_names[:n_cols]  # Truncate to match matrix
+    
+    filtered_metadata = metadata[metadata['cell_annotation'].isin(cell_names)].copy()
+    filtered_metadata = filtered_metadata.set_index('cell_annotation').reindex(cell_names)
+    n_before_filter = len(filtered_metadata)
+
+    # Debug: Check percent.mito values
+    mito_values = filtered_metadata['percent.mito']
+    print(f"  Mitochondrial percentage stats:")
+    print(f"    Min: {mito_values.min():.2f}, Max: {mito_values.max():.2f}, Mean: {mito_values.mean():.2f}")
+    print(f"    NaN count: {mito_values.isna().sum()}")
+    print(f"    Threshold: {mito_max}")
+
+    # Filter by mitochondrial percentage only
+    mito_mask = (filtered_metadata['percent.mito'] < mito_max).fillna(False)
+    combined_mask = mito_mask
+    filtered_metadata = filtered_metadata[combined_mask].copy()
+    
+    print(f"  Before: {n_before_filter:,} cells")
+    print(f"  After: {len(filtered_metadata):,} cells")
+    print(f"  Filtered out: {n_before_filter - len(filtered_metadata):,} cells")
+    
+    # Get cell indices to keep (cells that passed filters)
+    cells_to_keep = set(filtered_metadata.index.dropna().tolist())
+    cell_indices_to_keep = [i for i, name in enumerate(cell_names) if name in cells_to_keep]
+    
+    # Ensure indices are within matrix bounds
+    cell_indices_to_keep = [i for i in cell_indices_to_keep if 0 <= i < n_cols]
+    
+    # Filter matrix and cell names
+    filtered_matrix = matrix[:, cell_indices_to_keep]
+    filtered_cell_names = [cell_names[i] for i in cell_indices_to_keep]
+    
+    return filtered_matrix, filtered_cell_names, filtered_metadata

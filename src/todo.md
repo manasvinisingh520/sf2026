@@ -23,3 +23,12 @@
 - Why is `min_counts = 10`?
 - Set different values and run analyses
 - Compare results
+
+Winter Break:
+## 1. Finish DEG analysis
+    - should finish 12/23
+## 2. Code GRN
+    - GRNBoost2 looks best to me
+    - uses motif/TF dataset which is already downloaded
+    - 1-1.5 weeks
+## 3. Start GREmLN process

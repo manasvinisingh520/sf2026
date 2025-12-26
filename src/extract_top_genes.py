@@ -8,9 +8,11 @@ import pandas as pd
 import argparse
 import os
 from pathlib import Path
+from utils import get_dge_results_dir
+from config import REGIONS
 
 # Hardcoded gene list - add your genes here
-"""GENE_LIST = [
+GENE_LIST = [
     "ANGPTL4", "FGF2", "HGF", "NRP1", "NTRK3", "TGFB2", "TGFBR3", "VEGFA",
     "LGALS3", "SCARA3", "MAP3K14", "MAP4K4", "GPC4", "MATN2", "SERPINA3",
     "SERPINE2", "RFTN1",
@@ -46,16 +48,18 @@ from pathlib import Path
     "ATP2B4", "CALM1", "CKB", "GJA1", "KCNJ10", "SLC39A12",
     "COL27A1", "COL5A3", "PLEC",
     "APOE", "RORA", "RXRA", "SLC27A1"
-]"""
+]
+"""
 
 GENE_LIST = [
     "APOE", "APP", "PSEN1", "PSEN2", "ABCA7", "PICALM", "PLD3", "TREM2", "SORL1", "INPP5D", "CASS4", "NME8", "MEF2C",
     "PTK2B", "FERMT2", "ZCWPW1", "DSG2", "UNC5C", "ADAM10", "SLC24A4", "RIN3", "HLA-DRB1", "HLA-DRB5", "CELF1", 
     "PLD3", "AKAP9", "ATXN1", "CD33", "GWA14Q34", "DLGAP1", "CLU", "CR1", "BIN1", "CD2AP", "MS4A", "EPHA1"
 ]
+"""
 
 
-def compare_to_gene_list(genes_df: pd.DataFrame, label: str = "", return_normalized_names: bool = False) -> tuple:
+def compare_to_gene_list(genes_df: pd.DataFrame, label: str = "", return_normalized_names: bool = False, verbose: bool = True) -> tuple:
     """
     Compare genes in DataFrame to GENE_LIST.
     
@@ -87,16 +91,17 @@ def compare_to_gene_list(genes_df: pd.DataFrame, label: str = "", return_normali
     num_matching = len(overlapping_genes_normalized)
     overlap_pct = (num_matching / len(GENE_LIST)) * 100
     
-    title = "Gene List Overlap Analysis"
-    print(f"\n{'=' * 60}\n{title}\n{'=' * 60}")
-    print(f"Overlap percentage: {overlap_pct:.2f}% ({num_matching}/{len(GENE_LIST)})")
-    if num_matching > 0:
-        display_cols = [col for col in ['log2FoldChange', 'padj', 'baseMean'] if col in genes_df.columns]
-        print(f"\nMatching genes:")
-        for norm_gene in overlapping_genes_normalized:
-            print(f"{norm_gene}")
-            print(genes_df.loc[norm_gene][display_cols])
-            print()
+    if verbose:
+        title = "Gene List Overlap Analysis"
+        print(f"\n{'=' * 60}\n{title}\n{'=' * 60}")
+        print(f"Overlap percentage: {overlap_pct:.2f}% ({num_matching}/{len(GENE_LIST)})")
+        if num_matching > 0:
+            display_cols = [col for col in ['log2FoldChange', 'padj', 'baseMean'] if col in genes_df.columns]
+            print(f"\nMatching genes:")
+            for norm_gene in overlapping_genes_normalized:
+                print(f"{norm_gene}")
+                print(genes_df.loc[norm_gene][display_cols])
+                print()
     
     return (num_matching, overlap_pct, overlapping_genes_normalized) if return_normalized_names else (num_matching, overlap_pct)
 
@@ -126,7 +131,7 @@ def get_top_genes(results: pd.DataFrame, field_name: str, n: int = 10, padj_thre
     print()
     return x
 
-def extract_top_genes(results_file: str, output_file: str = None, padj_threshold: float = 0.05, log2fc_threshold: float = 0.5, args: argparse.Namespace = None) -> pd.DataFrame:
+def extract_top_genes(results_file: str = None, output_file: str = None, padj_threshold: float = 0.05, log2fc_threshold: float = 0.5, args: argparse.Namespace = None, combined_results: pd.DataFrame = None) -> pd.DataFrame:
     """
     Extract all genes with padj < threshold from DGE results file.
     Always prints top 10 genes passing padj threshold and top 10 passing log2fc threshold.
@@ -142,8 +147,12 @@ def extract_top_genes(results_file: str, output_file: str = None, padj_threshold
     log2fc_threshold : float, optional
         log2fc threshold for significant genes (default: 0.5)
     """
-    print(f"Reading DGE results from: {results_file}")
-    results = pd.read_csv(results_file, index_col=0)
+    if combined_results is not None:
+        results = combined_results
+        print(f"Using combined results from union of files")
+    else:
+        print(f"Reading DGE results from: {results_file}")
+        results = pd.read_csv(results_file, index_col=0)
     print(f"Total genes in results: {len(results)}")
     
     # Print top based on padj and log2fc thresholds
@@ -152,8 +161,33 @@ def extract_top_genes(results_file: str, output_file: str = None, padj_threshold
     _ = get_top_genes(results, 'padj', args.top_n, padj_threshold=args.padj_max)
     _ = get_top_genes(results, 'log2FoldChange', args.top_n, log2fc_threshold=args.log2fc_min)
     x = get_top_genes(results, 'padj', args.top_n, padj_threshold=args.padj_max, log2fc_threshold=args.log2fc_min)
-    # Compare x with GENE LIST
-    compare_to_gene_list(x, 'GENE LIST')
+    
+    # Compare overlap with GENE_LIST for top 10, top 200, and top 500
+    print(f"\n{'=' * 60}")
+    print("GENE_LIST Overlap Analysis for Different Top N Values")
+    print(f"{'=' * 60}")
+    
+    # Filter results by thresholds first
+    filtered_results = results.copy()
+    if args.padj_max is not None:
+        filtered_results = filtered_results[filtered_results['padj'] < args.padj_max]
+    if args.log2fc_min is not None:
+        filtered_results = filtered_results[abs(filtered_results['log2FoldChange']) > args.log2fc_min]
+    
+    # Sort by padj and get top N for each
+    filtered_results = filtered_results.sort_values('padj', ascending=True)
+    
+    for top_n in [10, 200, 500]:
+        top_genes = filtered_results.head(min(top_n, len(filtered_results)))
+        num_matching, overlap_pct, overlapping_genes = compare_to_gene_list(
+            top_genes, f'top {top_n}', return_normalized_names=True, verbose=False
+        )
+        print(f"Top {top_n}: {overlap_pct:.2f}% overlap ({num_matching}/{len(GENE_LIST)} genes)", end="")
+        if overlapping_genes:
+            print(f" - Matching: {', '.join(overlapping_genes)}")
+        else:
+            print()
+    
     return x
 
 
@@ -163,7 +197,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument('-version', type=str, choices=['1', '2', '3', '4'], required=True, help='DGE version (1, 2, 3, or 4).')
-    parser.add_argument('-region', type=str, required=True, help='Region name (e.g., EC, ITG)')
+    parser.add_argument('-region', type=str, choices=REGIONS, required=True, help='Region name (e.g., EC, ITG)')
     parser.add_argument('-cond1', type=str, required=True, help='Condition 1 identifier')
     parser.add_argument('-cond2', type=str, required=True, help='Condition 2 identifier')
     parser.add_argument('-bins', type=int, required=True, help='Bin number')
@@ -173,35 +207,50 @@ def main():
     parser.add_argument("-log2fc_min", type=float, default=0.5, help="log2fc threshold for significant genes")
     args = parser.parse_args()
     
-    # Determine base directory based on version (dge1, dge2, dge3, dge4)
-    version = args.version
-    base_dir = Path(rf"I:\sf2026\results\dge{version}")
-    filename = f"dge_results_{args.region}_{args.cond1}_vs_{args.cond2}_bins{args.bins}.csv"
-    input_file = base_dir / filename
+    # Get results directory using utility function
+    version = int(args.version)
+    base_dir = get_dge_results_dir(version)
     
-    print(f"Using DGE version: {version}")
-    print(f"Searching in directory: {base_dir}")
-    print(f"Input file: {filename}")
+    # Find all files matching region and bin size
+    pattern = f"dge_results_{args.region}_*_bins{args.bins}*.csv"
+    matching_files = sorted(list(base_dir.glob(pattern)))
     
-    # Check if file exists
-    if not input_file.exists():
+    if len(matching_files) == 0:
         raise FileNotFoundError(
-            f"File not found: {input_file}\n"
-            f"Looking for: {filename}\n"
+            f"No files found matching pattern: {pattern}\n"
             f"In directory: {base_dir.absolute()}"
         )
     
+    print(f"Using DGE version: {version}")
+    print(f"Searching in directory: {base_dir}")
+    print(f"Found {len(matching_files)} files matching pattern: {pattern}")
+    for f in matching_files:
+        print(f"  - {f.name}")
+    
+    # Load all files and take union
+    all_results = []
+    for file_path in matching_files:
+        df = pd.read_csv(file_path, index_col=0)
+        all_results.append(df)
+    
+    # Combine all results - take union of genes, keep best padj for each gene
+    combined_results = pd.concat(all_results, axis=0)
+    # For genes that appear in multiple files, keep the one with lowest padj
+    combined_results = combined_results.sort_values('padj', ascending=True, na_position='last')
+    combined_results = combined_results[~combined_results.index.duplicated(keep='first')]
+    
     print(f"\n{'=' * 60}")
-    print(f"Processing: {input_file}")
+    print(f"Union of {len(matching_files)} files: {len(combined_results)} unique genes")
     print(f"{'=' * 60}\n")
     
-    # Extract genes with padj < threshold
+    # Extract genes with padj < threshold from union
     genes = extract_top_genes(
-        results_file=str(input_file),
+        results_file=None,  # We'll pass the combined results directly
         output_file=args.output_file,
         padj_threshold=args.padj_max,
         log2fc_threshold=args.log2fc_min,
-        args=args
+        args=args,
+        combined_results=combined_results
     )
     return genes
 

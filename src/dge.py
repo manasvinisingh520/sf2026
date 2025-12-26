@@ -495,19 +495,21 @@ Examples:
     # Parse arguments
     args = parser.parse_args()
     
-    # Import utilities for reading MTX files
-    from utils import read_mtx_file, create_anndata_object, read_excel_columns
+    # Import utilities and config
+    from utils import read_mtx_file, create_anndata_object, read_excel_columns, get_region_file_paths
+    from config import REGION_TO_TAB, DATA_DIR, METADATA_DATE_PREFIX
     
-    # Construct file paths based on region
-    # FIXME: Maybe create global configuration file for data paths?
-    base_dir = r"i:\sf2026\data"
-    date_prefix = "2025-11-16"  # Adjust if needed
+    # Configuration
+    base_dir = DATA_DIR
+    date_prefix = METADATA_DATE_PREFIX
     region = args.region
     
-    # Construct paths for region-specific files
-    mtx_path = os.path.join(base_dir, f"{date_prefix}_Astrocytes_{region}_matrix.mtx")
-    row_annotation_path = os.path.join(base_dir, f"{date_prefix}_Astrocytes_{region}_row_annotation.txt")
-    col_annotation_path = os.path.join(base_dir, f"{date_prefix}_Astrocytes_{region}_cell_annotation.txt")
+    # Get file paths using utility function
+    mtx_path, row_annotation_path, col_annotation_path = get_region_file_paths(
+        region,
+        data_dir=base_dir,
+        base_prefix=f"{date_prefix}_Astrocytes_{{region}}"
+    )
     metadata_path = os.path.join(base_dir, f"{date_prefix}_Astrocytes_metadata.xlsx")
     
     print("=" * 60)
@@ -518,16 +520,8 @@ Examples:
     print(f"Group 2: {args.group2}")
     print()
     
-    # Map region to tab index (0-based)
-    region_to_tab = {
-        "EC": 0,      # First tab (default)
-        "ITG": 1,     # Second tab (BA 20)
-        "PFC": 2,     # Third tab (BA 21)
-        "V2": 3,      # Fourth tab
-        "V1": 4,      # Fifth tab
-    }
-    
-    tab_index = region_to_tab.get(region)
+    # Get tab index from config
+    tab_index = REGION_TO_TAB.get(region)
     if tab_index is None:
         raise ValueError(f"Region '{region}' not mapped to a tab index. Available regions: {list(region_to_tab.keys())}")
     
