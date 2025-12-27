@@ -9,7 +9,7 @@ import pandas as pd
 import numpy as np
 from typing import Optional, Tuple, Dict, List, Any
 from anndata import AnnData
-from utils import filter_anndata_object
+from utils import filter_anndata_object, aggregate_cells_into_pseudobulk
 
 try:
     from pydeseq2.dds import DeseqDataSet
@@ -137,10 +137,6 @@ class DGEAnalyzer:
             Sample metadata with condition information
         """
 
-        # Apply quality filters
-        if self.min_genes is not None:
-            self.data_file = filter_anndata_object(self.data_file, min_genes=self.min_genes, min_cells=3, min_counts=None, max_counts=None)
-        
         if self.data_file is None:
             raise ValueError("Failed to filter AnnData object. Check your filter thresholds.")
 
@@ -290,12 +286,37 @@ class DGEAnalyzer:
             self.stat_res_dict[pair_key] = stat_res
             self.results_dict[pair_key] = results
             
-            # Find significant genes
+            # Diagnostic: Report NaN padj statistics
+            nan_padj_count = results['padj'].isna().sum()
+            valid_padj_count = results['padj'].notna().sum()
+            total_genes = len(results)
+            
+            if nan_padj_count > 0:
+                print(f"\n[Diagnostic] padj statistics for {pair_key}:")
+                print(f"  Total genes: {total_genes}")
+                print(f"  Genes with valid padj: {valid_padj_count} ({valid_padj_count/total_genes*100:.1f}%)")
+                print(f"  Genes with NaN padj: {nan_padj_count} ({nan_padj_count/total_genes*100:.1f}%)")
+                
+                # Check if NaN padj is expected (low baseMean)
+                nan_padj_genes = results[results['padj'].isna()]
+                if len(nan_padj_genes) > 0:
+                    max_baseMean_nan = nan_padj_genes['baseMean'].max()
+                    mean_baseMean_nan = nan_padj_genes['baseMean'].mean()
+                    print(f"  NaN padj genes - max baseMean: {max_baseMean_nan:.3f}, mean: {mean_baseMean_nan:.3f}")
+                    
+                    if max_baseMean_nan < 1.0:
+                        print(f"Expected: All NaN padj genes have low expression (baseMean < 1)")
+                    else:
+                        print(f"Warning: Some NaN padj genes have high expression (max baseMean = {max_baseMean_nan:.3f})")
+                        print(f"    This may indicate an issue - check DESeq2 convergence warnings")
+            
+            # Find significant genes (only use genes with valid padj)
             padj_threshold = self.threshold.get('padj', 0.05)
             log2fc_threshold = self.threshold.get('log2fc', 1.0)
             
             mask = (
                 (results['padj'] < padj_threshold) &
+                (results['padj'].notna()) &
                 (abs(results['log2FoldChange']) > log2fc_threshold)
             )
             
@@ -379,14 +400,6 @@ class DGEAnalyzer:
             f")"
         )
 
-
-def shuffle_data(adata: AnnData, seed: int) -> AnnData:
-    rng = np.random.RandomState(seed)
-    n_cells = adata.n_obs
-    shuffled_indices = rng.permutation(n_cells)
-    return adata[shuffled_indices].copy()
-
-
 # Example usage
 if __name__ == "__main__":
     """
@@ -409,27 +422,34 @@ if __name__ == "__main__":
         description='Run Differential Gene Expression (DGE) analysis using PyDESeq2',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+
+    parser.add_argument(
+        '-cell_type',
+        type=str,
+        required=True,
+        help='Cell type identifier to locate data files (e.g., Astrocytes, Microglia)'
+    )
     
     parser.add_argument(
-        '--region',
+        '-region',
         type=str,
         required=True,
         help='Region identifier to locate data files (e.g., EC, ITG, PFC, V1, V2)'
     )
     parser.add_argument(
-        '--seed',
+        '-seed',
         type=int,
         default=100,
         help='Random seed for cell shuffling before pseudobulk binning (default: 100)'
     )
     parser.add_argument(
-        '--topK',
+        '-topK',
         type=int,
         default=10,
         help='Number of top genes to display (default: 50)'
     )
     parser.add_argument(
-        '--bins',
+        '-bins',
         type=int,
         default=800,
         help='Target number of cells per bin for pseudobulk aggregation (default: 800)'
@@ -437,37 +457,60 @@ if __name__ == "__main__":
     
     # Parse arguments
     args = parser.parse_args()
-    random_seed = args.seed
     
     # Set global random seed for reproducibility
-    np.random.seed(random_seed)
+    np.random.seed(args.seed)
     
     # Import utilities and config
     from utils import read_mtx_file, create_anndata_object, read_excel_columns, get_region_file_paths
-    from config import REGION_TO_TAB, DEFAULT_METADATA_PATH, DATA_DIR, METADATA_DATE_PREFIX
+    from config import REGION_TO_TAB, DATA_DIR
     
     # Configuration
     base_dir = DATA_DIR
-    date_prefix = METADATA_DATE_PREFIX
     region = args.region
     
     # Get file paths using utility function
+    if args.cell_type == "Astrocytes":
+        base_prefix = f"2025-11-16_{args.cell_type}_{region}"
+    elif args.cell_type == "Microglia":
+        base_prefix = f"2025-12-27_{args.cell_type}_{region}"
+    else:
+        raise ValueError(f"Cell type '{args.cell_type}' not supported. Available cell types: Astrocytes, Microglia")
+    
     mtx_path, row_annotation_path, col_annotation_path = get_region_file_paths(
         region,
         data_dir=base_dir,
-        base_prefix=f"{date_prefix}_Astrocytes_{{region}}"
+        base_prefix=f"{base_prefix}"
     )
-    metadata_path = os.path.join(base_dir, f"{date_prefix}_Astrocytes_metadata.xlsx")
-    
+    if args.cell_type == "Astrocytes":
+        metadata_path = os.path.join(base_dir, f"{base_prefix}_metadata.xlsx")
+    elif args.cell_type == "Microglia":
+        metadata_path = os.path.join(base_dir, f"{base_prefix}_metadata.csv")
+    else:
+        raise ValueError(f"Cell type '{args.cell_type}' not supported. Available cell types: Astrocytes, Microglia")
+        
     # Get tab index from config
-    tab_index = REGION_TO_TAB.get(region)
-    if tab_index is None:
-        raise ValueError(f"Region '{region}' not mapped to a tab index. Available regions: {list(REGION_TO_TAB.keys())}")
-    
-    # Load metadata
-    metadata = read_excel_columns(metadata_path, columns=['cell_annotation', "RIN", "Path..Group.", "SampleName", 
-                                                          "Median.UMI.Counts.per.Cell", "percent.mito"],
-                                  sheet_name=tab_index)
+    if args.cell_type == "Astrocytes":
+        tab_index = REGION_TO_TAB.get(region)
+        if tab_index is None:
+            raise ValueError(f"Region '{region}' not mapped to a tab index. Available regions: {list(REGION_TO_TAB.keys())}")
+        metadata = read_excel_columns(metadata_path, columns=['cell_annotation', "RIN", "Path..Group.", "SampleName", 
+                                                            "Median.UMI.Counts.per.Cell", "percent.mito"],
+                                    sheet_name=tab_index)
+    else:
+        tab_index = None
+        metadata = pd.read_csv(metadata_path)
+        # Rename columns with spaces to use underscores to avoid formula syntax errors
+        rename_dict = {}
+        if 'Pathology Stage' in metadata.columns:
+            rename_dict['Pathology Stage'] = 'Pathology_Stage'
+        if 'Donor ID' in metadata.columns:
+            rename_dict['Donor ID'] = 'Donor_ID'
+        if rename_dict:
+            metadata = metadata.rename(columns=rename_dict)
+        # Convert condition column to strings
+        if 'Pathology_Stage' in metadata.columns:
+            metadata['Pathology_Stage'] = metadata['Pathology_Stage'].astype(str)
     
     # Read the MTX file
     matrix, gene_names, cell_names = read_mtx_file(
@@ -489,134 +532,47 @@ if __name__ == "__main__":
     print (f"Before filtering: {adata.shape} (cells × genes)")
 
     # Apply quality filters
-    adata = filter_anndata_object(adata, min_genes=200, min_cells=10, min_counts=None, max_counts=None, mito_max=0.15)
+    if args.cell_type == "Astrocytes":
+        adata = filter_anndata_object(adata, min_genes=200, min_cells=10, min_counts=None, max_counts=None, mito_max=0.15)
     
     print (f"After filtering: {adata.shape} (cells × genes)")
 
     if adata is None:
         raise ImportError("Failed to create AnnData object. Make sure anndata is installed.")
     
-    # Determine condition column
-    if 'Path..Group.' not in adata.obs.columns:
-        raise ValueError(f"No condition column found. Available columns: {list(adata.obs.columns)}")
+    if args.cell_type == "Astrocytes":
+        condition_col = 'Path..Group.'
+        patient_col = 'SampleName'
+    else:
+        condition_col = 'Pathology_Stage'  # Use renamed column without space
+        patient_col = 'Donor_ID'  # Use renamed column without space
     
-    condition_col = 'Path..Group.'
+    # Aggregate cells into pseudobulk samples
+    adata = aggregate_cells_into_pseudobulk(adata, target_cells_per_bin=args.bins, filter_patients_cell_threshold=80, seed=args.seed, patient_col=patient_col)
     
-    # CRITICAL: Aggregate cells into pseudobulk samples if dataset is too large
-    # DESeq2 is designed for bulk RNA-seq with few samples (3-10 per condition)
-    # Single-cell data with thousands of cells causes memory errors
-    # Pseudobulk aggregation is standard practice for single-cell DGE analysis
-    max_cells_for_deseq2 = 500  # DESeq2 can't handle more than ~500 cells efficiently
-    target_cells_per_bin = args.bins  # Target number of cells per bin
-    
-    if n_after > max_cells_for_deseq2:
-        from scipy.sparse import csr_matrix
-        
-        pseudobulk_data = []
-        pseudobulk_metadata = []
-        
-        for group_name in [group1, group2]:
-            group_mask = adata_filtered.obs[condition_col] == group_name
-            group_data = adata_filtered[group_mask]
-            unique_patients = group_data.obs['SampleName'].dropna().unique()
-            
-            print(f"\n{group_name}:")
-            total_bins_group = 0
-            
-            for patient_name in unique_patients:
-                patient_mask = group_data.obs['SampleName'] == patient_name
-                patient_cells = group_data[patient_mask]
-                n_cells_per_patient = patient_cells.n_obs
-                
-                if n_cells_per_patient < 80:
-                    print(f"  {patient_name}: {n_cells_per_patient} cells (skipped, < 80 cells)")
-                    continue
-                
-                # Shuffle cells for this patient using the seed from parser argument
-                if args.seed != 100:
-                    patient_cells = shuffle_data(patient_cells, random_seed)
-                
-                n_bins_for_patient = max(1, int(np.ceil(n_cells_per_patient / target_cells_per_bin)))
-                total_bins_group += n_bins_for_patient
-                print(f"  {patient_name}: {n_cells_per_patient} cells {n_bins_for_patient} bins")
-                base_cells_per_bin = n_cells_per_patient // n_bins_for_patient
-                remainder = n_cells_per_patient % n_bins_for_patient
-                
-                cell_idx = 0
-                for bin_idx in range(n_bins_for_patient):
-                    bin_size = base_cells_per_bin + (1 if bin_idx < remainder else 0)
-                    start_idx = cell_idx
-                    end_idx = cell_idx + bin_size
-                    
-                    patient_cells_subset = patient_cells[start_idx:end_idx]
-                    cell_idx = end_idx
-                    
-                    if hasattr(patient_cells_subset.X, 'toarray'):
-                        bin_counts = patient_cells_subset.X.sum(axis=0).A1
-                    else:
-                        bin_counts = patient_cells_subset.X.sum(axis=0)
-                    
-                    pseudobulk_data.append(bin_counts)
-                    pseudobulk_metadata.append({
-                        condition_col: group_name,
-                        'SampleName': patient_name,
-                        '_sample_id': f"{group_name}_{patient_name}_bin{bin_idx+1}"
-                    })
-            
-            print(f"  Total bins for {group_name}: {total_bins_group}")
-        
-        print(f"\nTotal pseudobulk samples: {len(pseudobulk_data)}")
-        pseudobulk_matrix = np.array(pseudobulk_data)
-        pseudobulk_obs = pd.DataFrame(pseudobulk_metadata)
-        pseudobulk_obs.index = pseudobulk_obs['_sample_id']
-        
-        adata_filtered = AnnData(
-            X=csr_matrix(pseudobulk_matrix),
-            obs=pseudobulk_obs,
-            var=adata_filtered.var.copy()
-        )
-    
+    # Ensure condition column is strings (in case aggregation changed types)
+    if condition_col in adata.obs.columns:
+        adata.obs[condition_col] = adata.obs[condition_col].astype(str)
+
     # Create output directory if it doesn't exist
-    output_dir = "results/dge4"
+    output_dir = "results/dge5"
     os.makedirs(output_dir, exist_ok=True)
     
     # Create DGE analyzer with group comparisons (using filtered/aggregated data)
-    output_file = os.path.join(output_dir, f"dge_results_{region}_{group1}_vs_{group2}_bins{target_cells_per_bin}_seed{random_seed}.csv")
+    if args.cell_type == "Microglia":
+        output_file = os.path.join(output_dir, f"dge_results_microglia_{region}_bins{args.bins}_seed{args.seed}.csv")
+    else:
+        output_file = os.path.join(output_dir, f"dge_results_{region}_bins{args.bins}_seed{args.seed}.csv")
     dge = DGEAnalyzer(
-        data_file=adata_filtered,
+        data_file=adata,
         condition=condition_col,
-        groups=[(group1, group2)],
+        groups=[('1', '2'), ('1', '3'), ('1', '4'), ('2', '3'), ('2', '4'), ('3', '4')],
         method="deseq2",
         threshold={'padj': 0.05, 'log2fc': 0.5},
         topK=args.topK,
         output_file=output_file,
-        min_counts=10,
-        n_cpus=2
+        n_cpus=16
     )
     
     # Run full analysis
     results = dge.run_full_analysis()
-    
-    # Access results for each comparison
-    print("\n" + "=" * 60)
-    print("Results Summary")
-    print("=" * 60)
-    for comparison_key, comparison_results in results.items():
-        print(f"\nComparison: {comparison_key}")
-        print(f"Total genes tested: {len(comparison_results['results'])}")
-        print(f"Significant DEGs (padj < 0.05, |log2FC| > 0.5): {len(comparison_results['significant_genes'])}")
-        
-        genes_padj_005 = comparison_results.get('genes_padj_005', pd.DataFrame())
-        top_genes = comparison_results.get('top_genes', pd.DataFrame())
-        
-        print(f"\nGenes with padj < 0.05: {len(genes_padj_005)}")
-        if len(top_genes) > 0:
-            print(f"\nTop {args.topK} genes (by padj):")
-            print(top_genes[['log2FoldChange', 'padj', 'baseMean']])
-        elif len(genes_padj_005) > 0:
-            # Fallback: show top K from genes_padj_005 if top_genes is empty
-            print(f"\nTop {args.topK} genes (by padj):")
-            print(genes_padj_005.head(args.topK)[['log2FoldChange', 'padj', 'baseMean']])
-        else:
-            print("  No genes found with padj < 0.05")
-

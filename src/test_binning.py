@@ -3,18 +3,10 @@ import numpy as np
 from pathlib import Path
 from collections import defaultdict
 import re
+from utils import get_top_k_genes
 
 
-def get_top_k_genes(df: pd.DataFrame, k: int, sort_by: str = 'padj') -> set:
-    df_clean = df[df[sort_by].notna()].copy()
-    if len(df_clean) == 0:
-        return set()
-    ascending = (sort_by == 'padj')
-    df_sorted = df_clean.sort_values(sort_by, ascending=ascending)
-    return set(df_sorted.head(k).index)
-
-
-def analyze_bin_overlap(results_dir: str = "results/dge4", top_k: int = 50):
+def analyze_bin_overlap(results_dir: str = "results/dge5", top_k: int = 50):
     results_dir = Path(results_dir)
     if not results_dir.exists():
         raise ValueError(f"Directory {results_dir} does not exist")
@@ -25,18 +17,19 @@ def analyze_bin_overlap(results_dir: str = "results/dge4", top_k: int = 50):
     
     file_groups = defaultdict(list)
     for file_path in csv_files:
-        filename = file_path.stem.replace('dge_results_', '')
-        match = re.match(r'(.+?)_bins(\d+)(?:_seed(\d+))?$', filename)
+        filename = file_path.stem
+        match = re.match(r'dge_results_(.+?)_bins(\d+)_seed(\d+)_(.+?)_vs_(.+?)$', filename)
         if match:
-            comparison = match.group(1)
+            region = match.group(1)
             bin_size = int(match.group(2))
-            seed = match.group(3) if match.group(3) else "100"
+            seed = match.group(3)
+            group1 = match.group(4)
+            group2 = match.group(5)
+            comparison = f"{region}_{group1}_vs_{group2}"
             file_groups[(comparison, bin_size)].append((file_path, seed))
     
     results = {}
     for (comparison, bin_size), files in file_groups.items():
-        if len(files) < 2:
-            continue
         
         seed_top_genes = {}
         for file_path, seed in sorted(files, key=lambda x: x[1]):
@@ -68,9 +61,9 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description='Analyze gene overlap across seeds for different bin sizes')
-    parser.add_argument('--results_dir', type=str, default='results/dge4',
+    parser.add_argument('--results_dir', type=str, default='results/dge5',
                        help='Directory containing DGE result CSV files (default: results/dge4)')
-    parser.add_argument('--top_k', type=int, default=50,
+    parser.add_argument('--top_k', type=int, default=500,
                        help='Number of top genes to consider (default: 50)')
     
     args = parser.parse_args()

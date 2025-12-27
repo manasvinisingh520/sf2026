@@ -10,21 +10,8 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from pathlib import Path
 from scipy.sparse import hstack
-from utils import read_mtx_file, read_excel_columns, filter_cells, get_region_file_paths
+from utils import read_mtx_file, read_excel_columns, filter_cells, get_region_file_paths, min_max_normalize
 from config import REGION_TO_TAB, DEFAULT_METADATA_PATH
-
-
-def min_max_normalize(matrix):
-    mat = matrix.tocoo(copy=True).astype(float) #coordinate format
-    # Convert to CSR for efficient row operations, then get max/min as dense arrays
-    matrix_csr = matrix.tocsr()
-    row_max = np.array(matrix_csr.max(axis=1).toarray()).ravel()
-    row_min = np.array(matrix_csr.min(axis=1).toarray()).ravel()
-    denom = row_max - row_min
-    denom[denom == 0] = 1.0  # Avoid divide by zero
-    mat.data = (mat.data - row_min[mat.row]) / denom[mat.row]
-    return mat.tocsr()
-
 
 def plot_all_genes_expression_histogram(bins, gene_names, region, max_genes=None, min_expression=None):
     cond_labels = ['Cond1', 'Cond2', 'Cond3', 'Cond4']

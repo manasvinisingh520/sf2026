@@ -15,6 +15,9 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from typing import Optional, List, Dict, Union, Tuple
+import anndata
+from collections import defaultdict
+import re
 
 
 def read_mtx_file(mtx_path, row_annotation_path=None, col_annotation_path=None, 
@@ -275,7 +278,7 @@ def filter_anndata_object(adata, min_genes=200, min_cells=3, min_counts=None,
     min_genes : int, default=200
         Minimum number of genes detected per cell
     min_cells : int, default=3
-        Minimum number of cells expressing each gene
+        Minimum number of cells expressing each gene (0 = no gene filtering)
     min_counts : int, optional
         Minimum total counts (UMIs) per cell
     max_counts : int, optional
@@ -287,7 +290,9 @@ def filter_anndata_object(adata, min_genes=200, min_cells=3, min_counts=None,
     """
     import scanpy as sc
     sc.pp.filter_cells(adata, min_genes=min_genes, min_counts=min_counts, max_counts=max_counts)
-    sc.pp.filter_genes(adata, min_cells=min_cells)
+    # Only filter genes if min_cells > 0
+    if min_cells > 0:
+        sc.pp.filter_genes(adata, min_cells=min_cells)
     if mito_max is not None:
         mask = (adata.obs['percent.mito'] < mito_max).fillna(False)
         adata = adata[mask].copy()
@@ -295,6 +300,132 @@ def filter_anndata_object(adata, min_genes=200, min_cells=3, min_counts=None,
         print("Warning: mito_max is not set. Skipping mito filter.")
 
     return adata
+
+
+# Shuffle an AnnData object based on the seed
+def shuffle_data(adata: anndata.AnnData, seed: int) -> anndata.AnnData:
+    rng = np.random.RandomState(seed)
+    n_cells = adata.n_obs
+    shuffled_indices = rng.permutation(n_cells)
+    # Create a new AnnData object with shuffled data by reordering underlying arrays
+    # This avoids issues with integer vs string observation names
+    shuffled_adata = anndata.AnnData(
+        X=adata.X[shuffled_indices] if adata.X is not None else None,
+        obs=adata.obs.iloc[shuffled_indices].copy(),
+        var=adata.var.copy(),
+        obsm={k: v[shuffled_indices] for k, v in adata.obsm.items()} if adata.obsm else {},
+        varm=adata.varm.copy() if adata.varm else {},
+        uns=adata.uns.copy() if adata.uns else {},
+        layers={k: v[shuffled_indices] for k, v in adata.layers.items()} if adata.layers else {}
+    )
+    return shuffled_adata
+
+
+def aggregate_cells_into_pseudobulk(adata, target_cells_per_bin, filter_patients_cell_threshold=80, seed=100, patient_col='SampleName'):
+    """
+    Aggregate cells into pseudobulk samples.
+    
+    CRITICAL: Aggregate cells into pseudobulk samples if dataset is too large
+    DESeq2 is designed for bulk RNA-seq with few samples (3-10 per condition)
+    Single-cell data with thousands of cells causes memory errors
+    Pseudobulk aggregation is standard practice for single-cell DGE analysis
+    
+    Parameters:
+    -----------
+    adata : AnnData
+        AnnData object with cells to aggregate
+    target_cells_per_bin : int
+        Target number of cells per bin
+    filter_patients_cell_threshold : int, default=80
+        Minimum number of cells per patient to include
+    seed : int, default=100
+        Random seed for shuffling cells
+    patient_col : str, default='SampleName'
+        Column name in adata.obs containing patient/donor identifiers
+        
+    Returns:
+    --------
+    adata_pseudobulk : AnnData
+        AnnData object with pseudobulk samples
+    """
+    from scipy.sparse import csr_matrix
+    from anndata import AnnData
+        
+    pseudobulk_data = []
+    pseudobulk_metadata = []
+    
+    if patient_col not in adata.obs.columns:
+        raise ValueError(f"Patient column '{patient_col}' not found in adata.obs. Available columns: {list(adata.obs.columns)}")
+    
+    unique_patients = adata.obs[patient_col].dropna().unique()
+    total_bins = 0
+                
+    for patient_name in unique_patients:
+        patient_mask = adata.obs[patient_col] == patient_name
+        patient_cells = adata[patient_mask]
+        num_cells = patient_cells.n_obs
+            
+        if num_cells < filter_patients_cell_threshold:
+            print(f"  {patient_name}: {num_cells} cells (skipped, < {filter_patients_cell_threshold} cells)")
+            continue
+            
+        # Shuffle cells for this patient using the seed
+        if seed != 100:
+            patient_cells = shuffle_data(patient_cells, seed)
+            
+        num_bins = max(1, int(np.ceil(num_cells / target_cells_per_bin)))
+        total_bins += num_bins
+        print(f"  {patient_name}: {num_cells} cells {num_bins} bins")
+        
+        # Get patient metadata (same across all cells for this patient)
+        # Use first cell's values since they're consistent across all cells
+        patient_metadata = patient_cells.obs.iloc[0].to_dict()
+        
+        # Distribute cells evenly across bins
+        base_cells_per_bin = num_cells // num_bins
+        remainder = num_cells % num_bins
+        
+        cell_idx = 0
+        for bin_idx in range(num_bins):
+            bin_size = base_cells_per_bin + (1 if bin_idx < remainder else 0)
+            start_idx = cell_idx
+            end_idx = cell_idx + bin_size
+            cell_idx = end_idx
+            
+            # Work directly with underlying arrays to avoid AnnData indexing issues
+            # Get the subset of the count matrix directly
+            X_subset = patient_cells.X[start_idx:end_idx]
+            
+            # Calculate bin counts (sum across cells, keep gene dimension)
+            if hasattr(X_subset, 'toarray'):
+                # Sparse matrix
+                bin_counts = X_subset.sum(axis=0).A1
+            else:
+                # Dense matrix
+                bin_counts = X_subset.sum(axis=0)
+            
+            # Build metadata dictionary with all patient-level metadata
+            metadata_dict = patient_metadata.copy()
+            metadata_dict['_sample_id'] = f"{patient_name}_bin{bin_idx+1}"
+            
+            pseudobulk_data.append(bin_counts)
+            pseudobulk_metadata.append(metadata_dict)
+    
+    print(f"  Total bins: {total_bins}")
+    print(f"\nTotal pseudobulk samples: {len(pseudobulk_data)}")
+    
+    pseudobulk_matrix = np.array(pseudobulk_data)
+    pseudobulk_obs = pd.DataFrame(pseudobulk_metadata)
+    pseudobulk_obs.index = pseudobulk_obs['_sample_id']
+    
+    adata_pseudobulk = AnnData(
+        X=csr_matrix(pseudobulk_matrix),
+        obs=pseudobulk_obs,
+        var=adata.var.copy()
+    )
+    
+    return adata_pseudobulk
+
 
 
 def get_region_file_paths(region, data_dir="data", base_prefix="2025-10-22_Astrocytes_{region}"):
@@ -352,7 +483,7 @@ def get_dge_results_dir(version: int, base_dir: str = None) -> Path:
     return base_dir / "results" / f"dge{version}"
 
 
-def filter_cells(matrix, cell_names, metadata, mito_max=15.0):
+def filter_cells(matrix, cell_names, metadata, mito_max=0.15, extra_filter = False):
     """
     Filter cells based on mitochondrial percentage threshold.
     
@@ -393,9 +524,16 @@ def filter_cells(matrix, cell_names, metadata, mito_max=15.0):
     print(f"    NaN count: {mito_values.isna().sum()}")
     print(f"    Threshold: {mito_max}")
 
-    # Filter by mitochondrial percentage only
+    # Filter by mitochondrial percentage
     mito_mask = (filtered_metadata['percent.mito'] < mito_max).fillna(False)
-    combined_mask = mito_mask
+    if extra_filter:
+        # Convert to numeric, coercing errors to NaN
+        RIN_numeric = pd.to_numeric(filtered_metadata['RIN'], errors='coerce')
+        TotalGenes_numeric = pd.to_numeric(filtered_metadata['Total.Genes.Detected'], errors='coerce')
+        RIN_genes_mask = ((RIN_numeric > 7.5) | (TotalGenes_numeric > 30000)).fillna(False)
+        combined_mask = mito_mask & RIN_genes_mask
+    else:
+        combined_mask = mito_mask
     filtered_metadata = filtered_metadata[combined_mask].copy()
     
     print(f"  Before: {n_before_filter:,} cells")
@@ -414,3 +552,79 @@ def filter_cells(matrix, cell_names, metadata, mito_max=15.0):
     filtered_cell_names = [cell_names[i] for i in cell_indices_to_keep]
     
     return filtered_matrix, filtered_cell_names, filtered_metadata
+
+
+def min_max_normalize(matrix):
+    mat = matrix.tocoo(copy=True).astype(float) #coordinate format
+    # Convert to CSR for efficient row operations, then get max/min as dense arrays
+    matrix_csr = matrix.tocsr()
+    row_max = np.array(matrix_csr.max(axis=1).toarray()).ravel()
+    row_min = np.array(matrix_csr.min(axis=1).toarray()).ravel()
+    denom = row_max - row_min
+    denom[denom == 0] = 1.0  # Avoid divide by zero
+    mat.data = (mat.data - row_min[mat.row]) / denom[mat.row]
+    return mat.tocsr()
+
+
+def get_top_k_genes(df: pd.DataFrame, k: int, sort_by: str = 'padj') -> set:
+    df_clean = df[df[sort_by].notna()].copy()
+    if len(df_clean) == 0:
+        return set()
+    ascending = (sort_by == 'padj')
+    df_sorted = df_clean.sort_values(sort_by, ascending=ascending)
+    return set(df_sorted.head(k).index)
+
+def get_DEGs(region, top_k=500, cell_type="Astrocytes"):
+    """
+    Get the intersection of top K genes (by padj) across all 6 comparisons for a region.
+    
+    Parameters:
+    -----------
+    region : str
+        Region name (EC, ITG, PFC, V1, V2, CrossRegion)
+    top_k : int
+        Number of top genes to select from each file (sorted by padj)
+    cell_type : str
+        Cell type (Astrocytes or Microglia)
+    
+    Returns:
+    --------
+    deg_genes : list
+        List of gene names that are in the top K genes of all comparisons (intersection)
+    """
+    dge_results_dir="results/dge_final"
+    dge_dir = Path(dge_results_dir)
+    
+    # Find all DGE results files for this region
+    if cell_type == "Microglia":
+        pattern = f"dge_results_microglia_{region}_*.csv"
+    else:
+        pattern = f"dge_results_{region}_*.csv"
+    dge_files = sorted(list(dge_dir.glob(pattern)))
+    
+    # Collect top K genes from each comparison
+    gene_sets = []
+    for dge_file in dge_files:
+        try:
+            df = pd.read_csv(dge_file, index_col=0)
+            # Get top K genes sorted by padj
+            top_genes = get_top_k_genes(df, top_k, sort_by='padj')
+            gene_sets.append(top_genes)
+            print(f"  {dge_file.name}: {len(top_genes)} top genes")
+        except Exception as e:
+            print(f"Warning: Could not load {dge_file}: {e}")
+            continue
+    
+    if not gene_sets:
+        print(f"No gene sets collected for region {region}")
+        return []
+    
+    print(f"Total comparisons: {len(gene_sets)}")
+    print(f"Gene set sizes: {[len(gs) for gs in gene_sets]}")
+    
+    # Return intersection of all top K gene sets
+    # gene_sets is a list of sets, so we unpack with * to pass them as separate arguments
+    common_genes = set.intersection(*gene_sets) if len(gene_sets) > 1 else gene_sets[0]
+    
+    print(f"Intersection size: {len(common_genes)}")
+    return list(common_genes)
