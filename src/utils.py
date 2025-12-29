@@ -18,6 +18,10 @@ from typing import Optional, List, Dict, Union, Tuple
 import anndata
 from collections import defaultdict
 import re
+import hashlib
+import pickle
+import os
+import config as cfg
 
 
 def read_mtx_file(mtx_path, row_annotation_path=None, col_annotation_path=None, 
@@ -117,6 +121,7 @@ def read_excel_columns(
 ) -> pd.DataFrame:
     """
     Read a Microsoft Excel file and return a pandas DataFrame with selected columns.
+    Results are cached based on all function arguments to speed up repeated calls.
 
     Parameters:
     -----------
@@ -138,6 +143,47 @@ def read_excel_columns(
     df : pandas.DataFrame
         DataFrame containing the selected columns.
     """
+    # Create cache directory if it doesn't exist
+    cache_dir = Path(".cache")
+    cache_dir.mkdir(exist_ok=True)
+    
+    # Generate cache key from all function arguments
+    cache_key_parts = [
+        str(file_path),
+        str(sorted(columns) if columns else None),
+        str(sheet_name),
+        str(sorted(dtype.items()) if dtype else None),
+        str(engine),
+        str(use_progress)
+    ]
+    cache_key_str = "|".join(cache_key_parts)
+    cache_key_hash = hashlib.md5(cache_key_str.encode()).hexdigest()
+    cache_file = cache_dir / f"excel_cache_{cache_key_hash}.pkl"
+    
+    # Check if source file exists and get its modification time
+    source_mtime = None
+    if os.path.exists(file_path):
+        source_mtime = os.path.getmtime(file_path)
+    
+    # Try to load from cache
+    if cache_file.exists():
+        try:
+            with open(cache_file, 'rb') as f:
+                cached_data = pickle.load(f)
+                cached_mtime = cached_data.get('source_mtime')
+                cached_df = cached_data.get('df')
+                
+                # Check if source file hasn't been modified since cache was created
+                if cached_mtime is not None and source_mtime is not None:
+                    if cached_mtime >= source_mtime:
+                        return cached_df.copy()
+                elif cached_mtime == source_mtime:  # Both None or same
+                    return cached_df.copy()
+        except Exception as e:
+            # If cache loading fails, continue to read from file
+            print(f"Warning: Failed to load cache ({e}), reading from file...")
+    
+    # Cache miss or invalid - read from file
     # If requested, try progress-enabled path using openpyxl + tqdm
     if use_progress:
         try:
@@ -215,6 +261,17 @@ def read_excel_columns(
                 except Exception as e:
                     print(f"Warning: Could not cast column '{col}' to {target_dtype}: {e}")
 
+    # Save to cache
+    try:
+        with open(cache_file, 'wb') as f:
+            pickle.dump({
+                'df': df,
+                'source_mtime': source_mtime
+            }, f)
+    except Exception as e:
+        # If caching fails, continue without cache
+        print(f"Warning: Failed to save cache ({e})")
+
     return df
 
 
@@ -267,7 +324,7 @@ def create_anndata_object(matrix, gene_names=None, cell_names=None, obs=None, tr
         return None
 
 def filter_anndata_object(adata, min_genes=200, min_cells=3, min_counts=None, 
-                          max_counts=None, mito_max=None):
+                          max_counts=None, mito_max=None, RIN_threshold=None):
     """
     Filter an AnnData object based on the number of genes and cells.
     
@@ -295,6 +352,12 @@ def filter_anndata_object(adata, min_genes=200, min_cells=3, min_counts=None,
         sc.pp.filter_genes(adata, min_cells=min_cells)
     if mito_max is not None:
         mask = (adata.obs['percent.mito'] < mito_max).fillna(False)
+        adata = adata[mask].copy()
+    if RIN_threshold is not None:
+        # Exclude cells where RIN == 'unk', then convert to numeric for comparison
+        mask_unk = (adata.obs['RIN'] != 'unk')
+        rin_numeric = pd.to_numeric(adata.obs['RIN'], errors='coerce')
+        mask = mask_unk & (rin_numeric > RIN_threshold).fillna(False)
         adata = adata[mask].copy()
     else:
         print("Warning: mito_max is not set. Skipping mito filter.")
@@ -572,9 +635,9 @@ def get_top_k_genes(df: pd.DataFrame, k: int, sort_by: str = 'padj') -> set:
         return set()
     ascending = (sort_by == 'padj')
     df_sorted = df_clean.sort_values(sort_by, ascending=ascending)
-    return set(df_sorted.head(k).index)
+    return list(df_sorted.head(k).index), set(df_sorted.head(k).index)
 
-def get_DEGs(region, top_k=500, cell_type="Astrocytes"):
+def get_DEGs(region, top_k=500, cell_type="Astrocytes", disable_intersection=False):
     """
     Get the intersection of top K genes (by padj) across all 6 comparisons for a region.
     
@@ -586,6 +649,8 @@ def get_DEGs(region, top_k=500, cell_type="Astrocytes"):
         Number of top genes to select from each file (sorted by padj)
     cell_type : str
         Cell type (Astrocytes or Microglia)
+    disable_intersection : bool
+        Whether to disable intersection of gene sets
     
     Returns:
     --------
@@ -600,6 +665,7 @@ def get_DEGs(region, top_k=500, cell_type="Astrocytes"):
         pattern = f"dge_results_microglia_{region}_*.csv"
     else:
         pattern = f"dge_results_{region}_*.csv"
+    pattern = f"dge_results_{region}_*_1_vs_4.csv"
     dge_files = sorted(list(dge_dir.glob(pattern)))
     
     # Collect top K genes from each comparison
@@ -608,9 +674,13 @@ def get_DEGs(region, top_k=500, cell_type="Astrocytes"):
         try:
             df = pd.read_csv(dge_file, index_col=0)
             # Get top K genes sorted by padj
-            top_genes = get_top_k_genes(df, top_k, sort_by='padj')
-            gene_sets.append(top_genes)
-            print(f"  {dge_file.name}: {len(top_genes)} top genes")
+            top_genes_list, top_genes_set = get_top_k_genes(df, top_k, sort_by='padj')
+            gene_sets.append(top_genes_set)
+            print(f"  {dge_file.name}: {len(top_genes_set)} top genes")
+            top_10_genes = top_genes_list[:min(len(top_genes_list), 10)]
+            print(f"  First 10 genes: {top_10_genes}")
+            print(f"  Gene types: {[cfg.gene_annotations_dict[gene] for gene in top_10_genes]}")
+
         except Exception as e:
             print(f"Warning: Could not load {dge_file}: {e}")
             continue
@@ -618,13 +688,25 @@ def get_DEGs(region, top_k=500, cell_type="Astrocytes"):
     if not gene_sets:
         print(f"No gene sets collected for region {region}")
         return []
-    
+ 
     print(f"Total comparisons: {len(gene_sets)}")
     print(f"Gene set sizes: {[len(gs) for gs in gene_sets]}")
     
     # Return intersection of all top K gene sets
     # gene_sets is a list of sets, so we unpack with * to pass them as separate arguments
-    common_genes = set.intersection(*gene_sets) if len(gene_sets) > 1 else gene_sets[0]
+    if disable_intersection:
+        common_genes = set.union(*gene_sets)
+        print(f"Union size: {len(common_genes)}")
+
+    else:
+        common_genes = set.intersection(*gene_sets) if len(gene_sets) > 1 else gene_sets[0]
+        print(f"Intersection size: {len(common_genes)}")
+
+    ## Check intersection with genes from paper
+    genes_from_paper = cfg.GENES_FROM_PAPER[region]
+    common_genes_with_paper = common_genes.intersection(genes_from_paper)
+    print(f"\033[92mIntersection with genes from paper: {len(common_genes_with_paper)} out of {len(genes_from_paper)}\033[0m")
+    for gene in common_genes_with_paper:
+        print(f"\033[92m{gene}\033[0m")
     
-    print(f"Intersection size: {len(common_genes)}")
     return list(common_genes)
