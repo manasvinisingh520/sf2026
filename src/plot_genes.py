@@ -193,7 +193,7 @@ def load_region_data(region, cell_type="Astrocytes", base_dir=DATA_DIR, date_pre
     # Apply basic quality filters
     # Set defaults if not provided
     if min_genes is None:
-        min_genes = 500 if use_DEGs else 30000
+        min_genes = 500 if use_DEGs else 3000
     
     if cell_type == "Astrocytes":
         if RIN_threshold is None:
@@ -486,6 +486,11 @@ def main():
         default=20,
         help='Number of top genes to use for DEGs (default: 20)'
     )
+    parser.add_argument(
+        '--use_protein_coding',
+        action='store_true',
+        help='Use DGE results from dge_final_protein_coding directory instead of dge_final'
+    )
     
     args = parser.parse_args()
     
@@ -517,7 +522,8 @@ def main():
 
             if args.use_DEGs:
                 print("Using DEGs...")
-                gene_list = get_DEGs(region, top_k=args.top_k, cell_type=args.cell_type, disable_intersection=True)
+                dge_results_dir = "results/dge_final_protein_coding" if args.use_protein_coding else "results/dge_final"
+                gene_list = get_DEGs(region, top_k=args.top_k, cell_type=args.cell_type, disable_intersection=True, dge_results_dir=dge_results_dir)
                 print(f"Found {len(gene_list)} DEGs")
                 if len(gene_list) == 0:
                     print("Warning: get_DEGs returned empty list! Using all genes instead.")

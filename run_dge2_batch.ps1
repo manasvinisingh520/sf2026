@@ -9,15 +9,10 @@ if (-not (Test-Path ".\src\dge2.py")) {
 }
 
 # Parameters
-$bins = @(100, 250, 500)
-$regions = @("EC", "ITG", "PFC", "V2", "V1")
+$bins = @(100)
+$regions = @("ITG", "PFC", "V2", "V1")
 
-# Generate 10 random seeds (using fixed seed for reproducibility of seed generation)
-$random = New-Object System.Random(42)  # Fixed seed for reproducible random seeds
-$seeds = @()
-for ($i = 0; $i -lt 10; $i++) {
-    $seeds += $random.Next(1000000, 9999999)  # 7-digit random seeds
-}
+$seeds = @(100)  # Single seed value
 
 # Count total runs
 $totalRuns = $bins.Count * $regions.Count * $seeds.Count
@@ -56,9 +51,6 @@ foreach ($bin in $bins) {
             $errorLogFile = Join-Path $logDir $errorLogFileName
             
             Write-Host "[$currentRun/$totalRuns] Running: region=$region, bins=$bin, seed=$seed"
-            
-            # Run the command and capture output
-            $command = "python .\src\dge2.py --region $region --seed $seed --bins $bin"
             
             try {
                 # Run command and redirect both stdout and stderr to log file

@@ -316,6 +316,14 @@ def create_anndata_object(matrix, gene_names=None, cell_names=None, obs=None, tr
             adata.obs_names = cell_names
         if obs is not None:
             adata.obs = obs
+
+        # Read gene annotations from gene_annotations.pkl
+        gene_annotations_file = os.path.join(cfg.DATA_DIR, "gene_annotations.pkl")
+        with open(gene_annotations_file, 'rb') as f:
+            gene_annotations = pickle.load(f)
+        # Add Gene type to var (gene-level metadata), not obs (cell-level metadata)
+        gene_type_dict = gene_annotations.set_index('Gene name')['Gene type'].to_dict()
+        adata.var['Gene type'] = [gene_type_dict.get(gene, 'unknown') for gene in adata.var_names]
         
         return adata
     
@@ -324,7 +332,7 @@ def create_anndata_object(matrix, gene_names=None, cell_names=None, obs=None, tr
         return None
 
 def filter_anndata_object(adata, min_genes=200, min_cells=3, min_counts=None, 
-                          max_counts=None, mito_max=None, RIN_threshold=None):
+                          max_counts=None, mito_max=None, RIN_threshold=None, gene_type=None):
     """
     Filter an AnnData object based on the number of genes and cells.
     
@@ -359,8 +367,11 @@ def filter_anndata_object(adata, min_genes=200, min_cells=3, min_counts=None,
         rin_numeric = pd.to_numeric(adata.obs['RIN'], errors='coerce')
         mask = mask_unk & (rin_numeric > RIN_threshold).fillna(False)
         adata = adata[mask].copy()
-    else:
-        print("Warning: mito_max is not set. Skipping mito filter.")
+
+    if gene_type is not None:
+        # Filter genes (columns) by gene type, not cells (rows)
+        mask = (adata.var['Gene type'] == gene_type).fillna(False)
+        adata = adata[:, mask].copy()
 
     return adata
 
@@ -521,31 +532,6 @@ def get_region_file_paths(region, data_dir="data", base_prefix="2025-10-22_Astro
     return mtx_path, row_path, col_path
 
 
-def get_dge_results_dir(version: int, base_dir: str = None) -> Path:
-    """
-    Get the path to DGE results directory for a given version.
-    
-    Parameters:
-    -----------
-    version : int
-        DGE version (1, 2, 3, or 4)
-    base_dir : str, optional
-        Base directory for results. If None, uses current working directory.
-    
-    Returns:
-    --------
-    results_dir : Path
-        Path to the DGE results directory (e.g., results/dge4)
-    """
-    if base_dir is None:
-        from pathlib import Path
-        base_dir = Path.cwd()
-    else:
-        base_dir = Path(base_dir)
-    
-    return base_dir / "results" / f"dge{version}"
-
-
 def filter_cells(matrix, cell_names, metadata, mito_max=0.15, extra_filter = False):
     """
     Filter cells based on mitochondrial percentage threshold.
@@ -629,15 +615,16 @@ def min_max_normalize(matrix):
     return mat.tocsr()
 
 
-def get_top_k_genes(df: pd.DataFrame, k: int, sort_by: str = 'padj') -> set:
+def get_top_k_genes(df: pd.DataFrame, k: int, sort_by: str = 'padj', padj_threshold: float = 0.05, log2fc_threshold: float = 1) -> set:
     df_clean = df[df[sort_by].notna()].copy()
     if len(df_clean) == 0:
         return set()
+    df_clean = df_clean[(df_clean['padj'] < padj_threshold) & (abs(df_clean['log2FoldChange']) > log2fc_threshold)]
     ascending = (sort_by == 'padj')
     df_sorted = df_clean.sort_values(sort_by, ascending=ascending)
     return list(df_sorted.head(k).index), set(df_sorted.head(k).index)
 
-def get_DEGs(region, top_k=500, cell_type="Astrocytes", disable_intersection=False):
+def get_DEGs(region, top_k=500, cell_type="Astrocytes", disable_intersection=False, dge_results_dir=None):
     """
     Get the intersection of top K genes (by padj) across all 6 comparisons for a region.
     
@@ -651,21 +638,29 @@ def get_DEGs(region, top_k=500, cell_type="Astrocytes", disable_intersection=Fal
         Cell type (Astrocytes or Microglia)
     disable_intersection : bool
         Whether to disable intersection of gene sets
+    dge_results_dir : str, optional
+        Directory containing DGE results files. If None, defaults to "results/dge_final"
     
     Returns:
     --------
     deg_genes : list
         List of gene names that are in the top K genes of all comparisons (intersection)
     """
-    dge_results_dir="results/dge_final"
+    if dge_results_dir is None:
+        dge_results_dir = "results/dge_final"
     dge_dir = Path(dge_results_dir)
     
     # Find all DGE results files for this region
+    # Check if using protein coding directory (format: dge_results_PC_{region}_*.csv)
+    is_protein_coding = "protein_coding" in dge_results_dir
+    
     if cell_type == "Microglia":
         pattern = f"dge_results_microglia_{region}_*.csv"
+    elif is_protein_coding:
+        pattern = f"dge_results_PC_{region}_*.csv"
     else:
         pattern = f"dge_results_{region}_*.csv"
-    pattern = f"dge_results_{region}_*_1_vs_4.csv"
+    #pattern = f"dge_results_{region}_*_2_vs_4.csv"
     dge_files = sorted(list(dge_dir.glob(pattern)))
     
     # Collect top K genes from each comparison
@@ -702,11 +697,66 @@ def get_DEGs(region, top_k=500, cell_type="Astrocytes", disable_intersection=Fal
         common_genes = set.intersection(*gene_sets) if len(gene_sets) > 1 else gene_sets[0]
         print(f"Intersection size: {len(common_genes)}")
 
-    ## Check intersection with genes from paper
-    genes_from_paper = cfg.GENES_FROM_PAPER[region]
-    common_genes_with_paper = common_genes.intersection(genes_from_paper)
-    print(f"\033[92mIntersection with genes from paper: {len(common_genes_with_paper)} out of {len(genes_from_paper)}\033[0m")
-    for gene in common_genes_with_paper:
-        print(f"\033[92m{gene}\033[0m")
+    ## Check intersection with genes from paper (if available for this region)
+    if region in cfg.GENES_FROM_PAPER:
+        genes_from_paper = cfg.GENES_FROM_PAPER[region]
+        common_genes_with_paper = common_genes.intersection(genes_from_paper)
+        print(f"\033[92mIntersection with genes from paper: {len(common_genes_with_paper)} out of {len(genes_from_paper)}\033[0m")
+        for gene in common_genes_with_paper:
+            print(f"\033[92m{gene}\033[0m")
+    else:
+        print(f"Note: No genes from paper defined for region '{region}'")
     
     return list(common_genes)
+
+
+def assay_names(adata):
+    """
+    Get assay/layer names from AnnData object (equivalent to R's assayNames(sce)).
+    
+    Parameters:
+    -----------
+    adata : AnnData
+        AnnData object
+        
+    Returns:
+    --------
+    assay_names : list
+        List of assay/layer names. Always includes 'X' (main matrix),
+        followed by any additional layers.
+    """
+    from anndata import AnnData
+    if not isinstance(adata, AnnData):
+        raise TypeError(f"Expected AnnData object, got {type(adata)}")
+    
+    # Main matrix is always 'X'
+    names = ['X']
+    
+    # Add layer names if they exist
+    if adata.layers:
+        names.extend(list(adata.layers.keys()))
+    
+    return names
+
+
+def colnames_colData(adata):
+    """
+    Get column names from cell metadata (obs) in AnnData object 
+    (equivalent to R's colnames(colData(sce))).
+    
+    Parameters:
+    -----------
+    adata : AnnData
+        AnnData object
+        
+    Returns:
+    --------
+    column_names : list
+        List of column names in adata.obs (cell metadata)
+    """
+    from anndata import AnnData
+    if not isinstance(adata, AnnData):
+        raise TypeError(f"Expected AnnData object, got {type(adata)}")
+    
+    return list(adata.obs.columns)
+

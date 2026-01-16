@@ -483,7 +483,7 @@ if __name__ == "__main__":
         base_prefix=f"{base_prefix}"
     )
     if args.cell_type == "Astrocytes":
-        metadata_path = os.path.join(base_dir, f"{base_prefix}_metadata.xlsx")
+        metadata_path = os.path.join(base_dir, f"2025-11-16_Astrocytes_metadata.xlsx")
     elif args.cell_type == "Microglia":
         metadata_path = os.path.join(base_dir, f"{base_prefix}_metadata.csv")
     else:
@@ -533,7 +533,7 @@ if __name__ == "__main__":
 
     # Apply quality filters
     if args.cell_type == "Astrocytes":
-        adata = filter_anndata_object(adata, min_genes=200, min_cells=10, min_counts=None, max_counts=None, mito_max=0.15)
+        adata = filter_anndata_object(adata, min_genes=0, min_cells=0, min_counts=None, max_counts=None, mito_max=None, gene_type="protein_coding")
     
     print (f"After filtering: {adata.shape} (cells × genes)")
 
@@ -555,7 +555,7 @@ if __name__ == "__main__":
         adata.obs[condition_col] = adata.obs[condition_col].astype(str)
 
     # Create output directory if it doesn't exist
-    output_dir = "results/dge5"
+    output_dir = "results/dge_final_protein_coding"
     os.makedirs(output_dir, exist_ok=True)
     
     # Create DGE analyzer with group comparisons (using filtered/aggregated data)

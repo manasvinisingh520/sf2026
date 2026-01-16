@@ -11,8 +11,8 @@ if (-not (Test-Path ".\src\dge2.py")) {
 # Parameters
 $cell_type = "Microglia"
 $bins = @(100)
-#$regions = @("EC", "ITG", "PFC", "V2", "V1", "CrossRegion")
-$regions = @("V2")
+$regions = @("EC", "ITG", "PFC", "V2", "V1", "CrossRegion")
+#$regions = @("V2")
 
 # Use a single seed
 $seeds = @(100)  # Single seed value

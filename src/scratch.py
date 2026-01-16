@@ -1,4 +1,8 @@
-from utils import get_DEGs
+import pandas as pd
 
-gene_list = get_DEGs("V2", top_k=500, cell_type="Microglia")
-print(len(gene_list))
+# Load patient mapping CSV
+mapping_df = pd.read_csv("data/GRN/Astrocytes/EC_Astrocytes_patient_mapping.csv")
+
+# Count number of unique patients
+num_patients = mapping_df['patient_name']
+print(f"Number of patients: {num_patients}")
