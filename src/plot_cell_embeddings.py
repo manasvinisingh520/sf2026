@@ -1,265 +1,384 @@
 """
-Plot cell embeddings with clustering and stage distribution analysis.
+Plot cell embeddings using UMAP visualization.
 """
 
+import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
-from matplotlib.colors import BoundaryNorm
-import os
+import umap
+import argparse
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
-import umap
-import scanpy as sc
+from collections import Counter
+import pickle
+import re
+from utils import create_color_mapping
+
+parser = argparse.ArgumentParser(description='Plot cell embeddings using UMAP visualization.')
+parser.add_argument('--region', type=str, default='V2', help='Region to process (default: V2). Can specify multiple regions separated by commas.')
+parser.add_argument('--n_clusters', type=int, default=4, help='Maximum number of clusters to test (tests from 2 to n_clusters, default: 4)')
+parser.add_argument('--combine_all', action='store_true', help='Combine all embeddings from all regions (both Astrocytes and Microglia)')
+parser.add_argument('--color_by', type=str, default='cluster', choices=['cluster', 'cell_type', 'region', 'condition'], 
+                    help='Color embeddings by: cluster (default), cell_type, region, or condition')
+parser.add_argument('--cells_to_keep', type=str, default=None, 
+                    choices=['Astrocytes', 'Microglia'],
+                    help='Cell type to filter by: Astrocytes or Microglia. If not specified, loads all cell types.')
+args = parser.parse_args()
 
 
 def load_cell_embeddings(embeddings_path):
-    """Load cell embeddings from TSV/CSV file."""
+    """Load cell embeddings from TSV/CSV file.
+    
+    Returns:
+    --------
+    embeddings_array : np.ndarray
+        Array of embeddings (cells × dimensions)
+    cell_names : list
+        List of cell names from first column
+    """
     try:
         df = pd.read_csv(embeddings_path, sep=',', header=None)
     except:
         df = pd.read_csv(embeddings_path, sep='\t', header=None)
     
     embeddings_list = []
+    cell_names = []
     for idx in range(1, len(df)):
         row = df.iloc[idx]
+        cell_name = str(row.iloc[0]).strip()  # First column is cell name (patient_bin format)
         embedding_values = row.iloc[1:].values
         embedding_values = [float(x) for x in embedding_values if pd.notna(x)]
         if len(embedding_values) > 0:
             embeddings_list.append(embedding_values)
+            cell_names.append(cell_name)
         
-    return np.array(embeddings_list)
+    return np.array(embeddings_list), cell_names
 
 
 def load_conditions_from_mapping(mapping_path):
     """Load conditions from patient mapping CSV file."""
-    mapping_df = pd.read_csv(mapping_path)
-    cell_conditions = mapping_df['condition'].values.tolist()
-    cell_conditions = [str(c) if pd.notna(c) else None for c in cell_conditions]
-    return cell_conditions
-
-
-def create_color_mapping(cell_conditions):
-    """Create color mapping for conditions."""
-    unique_conditions = sorted([c for c in set(cell_conditions) if c is not None])
+    if not os.path.exists(mapping_path):
+        print(f"Warning: Mapping file not found: {mapping_path}")
+        return None
     
-    custom_colors = {
-        '1': 'green',
-        '2': 'lightgreen',
-        '3': 'orange',
-        '4': 'red'
-    }
-    
-    condition_to_color = {c: custom_colors.get(c, 'gray') for c in unique_conditions}
-    point_colors = [condition_to_color.get(cond, 'gray') if cond is not None else 'gray' 
-                    for cond in cell_conditions]
-    
-    return unique_conditions, condition_to_color, point_colors
-
-
-def create_tf_color_mapping(cell_tfs):
-    """Create color mapping for TFs using a colormap."""
-    unique_tfs = sorted([tf for tf in set(cell_tfs) if tf is not None])
-    n_tfs = len(unique_tfs)
-    
-    # Use a colormap to assign colors (cycling through tab20 if more than 20 TFs)
-    cmap = plt.cm.tab20
-    tf_to_color = {}
-    for idx, tf in enumerate(unique_tfs):
-        tf_to_color[tf] = cmap(idx % 20)
-    
-    point_colors = [tf_to_color.get(tf, 'gray') if tf is not None else 'gray' 
-                    for tf in cell_tfs]
-    
-    return unique_tfs, tf_to_color, point_colors
-
-
-def create_legend(unique_conditions, condition_to_color, has_unmapped=False):
-    """Create legend elements for conditions that are actually present."""
-    elements = [Patch(facecolor=condition_to_color[c], label=c) for c in unique_conditions]
-    if has_unmapped:
-        elements.append(Patch(facecolor='gray', label='Unmapped'))
-    return elements
-
-
-def create_tf_legend(unique_tfs, tf_to_color, has_unmapped=False, max_legend_items=20):
-    """Create legend elements for TFs that are actually present."""
-    # Limit legend items to avoid overcrowding
-    tfs_to_show = unique_tfs[:max_legend_items]
-    elements = [Patch(facecolor=tf_to_color[tf], label=tf) for tf in tfs_to_show]
-    if len(unique_tfs) > max_legend_items:
-        elements.append(Patch(facecolor='gray', label=f'... and {len(unique_tfs) - max_legend_items} more'))
-    if has_unmapped:
-        elements.append(Patch(facecolor='gray', label='Unmapped'))
-    return elements
-
-
-def cluster_embeddings(embeddings, n_clusters=6):
-    """Cluster embeddings using KMeans."""
-    clusterer = KMeans(n_clusters=n_clusters, random_state=42)
-    return clusterer.fit_predict(embeddings)
-
-
-def calculate_stage_percentages(cluster_labels, cell_conditions):
-    """Calculate percentage of each stage within each cluster."""
-    df = pd.DataFrame({
-        'cluster': cluster_labels,
-        'stage': cell_conditions
-    })
-    
-    stage_totals = df['stage'].value_counts().to_dict()
-    cluster_stage_counts = df.groupby(['cluster', 'stage']).size().unstack(fill_value=0)
-    
-    percentage_df = pd.DataFrame(index=cluster_stage_counts.index, columns=cluster_stage_counts.columns)
-    for stage in cluster_stage_counts.columns:
-        stage_total = stage_totals.get(stage, 0)
-        if stage_total > 0:
-            percentage_df[stage] = (cluster_stage_counts[stage] / stage_total) * 100
+    try:
+        mapping_df = pd.read_csv(mapping_path)
+        if 'condition' in mapping_df.columns:
+            cell_conditions = mapping_df['condition'].values.tolist()
+            cell_conditions = [str(c) if pd.notna(c) else None for c in cell_conditions]
+            return cell_conditions
         else:
-            percentage_df[stage] = 0
-    
-    return percentage_df.sort_index(), cluster_stage_counts
+            print(f"Warning: 'condition' column not found in {mapping_path}")
+            return None
+    except Exception as e:
+        print(f"Warning: Could not load conditions from {mapping_path}: {e}")
+        return None
 
 
-def calculate_tf_distribution(cluster_labels, cell_tfs):
-    """Calculate TF distribution within each cluster."""
-    df = pd.DataFrame({
-        'cluster': cluster_labels,
-        'tf': cell_tfs
-    })
+def concatenate_all_embeddings(cell_type_filter=None):
+    """
+    Automatically find and combine all cell embeddings from all regions.
     
-    # Count TFs per cluster
-    cluster_tf_counts = df.groupby(['cluster', 'tf']).size().unstack(fill_value=0)
+    Parameters:
+    -----------
+    cell_type_filter : str, optional
+        Cell type to filter by: 'Astrocytes' or 'Microglia'. If None, loads all cell types.
     
-    # Calculate percentages: for each cluster, what % of cells have each TF
-    cluster_tf_percentages = cluster_tf_counts.div(cluster_tf_counts.sum(axis=1), axis=0) * 100
+    Returns:
+    --------
+    concatenated_embeddings : np.ndarray
+        Concatenated embedding matrix (cells × dimensions)
+    all_conditions : list
+        List of conditions for each cell
+    cell_labels : list
+        List of labels for each cell (format: "region" or "region_celltype")
+    all_cell_names : list
+        List of cell names
+    """
+    embeddings_dir = os.path.join("GREmLN", "embeddings")
+    if not os.path.exists(embeddings_dir):
+        raise ValueError(f"Embeddings directory not found: {embeddings_dir}")
     
-    # Find top TF per cluster (TF with highest count)
-    top_tf_per_cluster = cluster_tf_counts.idxmax(axis=1)
-    top_tf_counts = cluster_tf_counts.max(axis=1)
-    top_tf_percentages = cluster_tf_percentages.max(axis=1)
+    # Find all cell embedding files
+    import glob
+    embedding_files = glob.glob(os.path.join(embeddings_dir, "*_cell_embeddings.tsv"))
+    embedding_files.extend(glob.glob(os.path.join(embeddings_dir, "*_cell_embeddings.csv")))
     
-    return cluster_tf_counts, top_tf_per_cluster, top_tf_counts, top_tf_percentages
+    print(f"\nFound {len(embedding_files)} embedding file(s)...")
+    all_embeddings = []
+    all_conditions = []
+    all_cell_labels = []
+    all_cell_names = []
+    
+    for emb_path in sorted(embedding_files):
+        filename = os.path.basename(emb_path)
+        # Extract region and cell type from filename (e.g., "EC_cell_embeddings.tsv" or "EC_Astrocytes_cell_embeddings.tsv")
+        parts = filename.replace('_cell_embeddings.tsv', '').replace('_cell_embeddings.csv', '').split('_')
+        
+        if len(parts) >= 2 and parts[-1] in ['Astrocytes', 'Microglia']:
+            region = '_'.join(parts[:-1])
+            cell_type = parts[-1]
+        else:
+            # Assume it's just region name, check if it's Astrocytes
+            region = '_'.join(parts)
+            # Check if filename contains Microglia
+            if 'Microglia' in filename:
+                cell_type = 'Microglia'
+            else:
+                cell_type = None  # Assume Astrocytes for labels without explicit type
+        
+        # Filter by cell type if specified
+        actual_cell_type = cell_type or 'Astrocytes'
+        if cell_type_filter is not None and actual_cell_type != cell_type_filter:
+            print(f"  Skipping {filename} (cell_type: {actual_cell_type}, filter: {cell_type_filter})")
+            continue
+        
+        print(f"  Loading: {filename} (region: {region}, cell_type: {actual_cell_type})")
+        embeddings, cell_names = load_cell_embeddings(emb_path)
+        all_embeddings.append(embeddings)
+        n_cells = embeddings.shape[0]
+        all_cell_names.extend(cell_names)
+        
+        # Create cell label
+        if cell_type:
+            cell_label = f"{region}_{cell_type}"
+        else:
+            cell_label = region  # Assume Astrocytes
+        all_cell_labels.extend([cell_label] * n_cells)
+        
+        # Try to load conditions from appropriate directory
+        conditions = None
+        if cell_type == 'Microglia':
+            mapping_path = os.path.join("data", "GRN", "Microglia", f"{region}_Microglia_patient_mapping.csv")
+            if not os.path.exists(mapping_path):
+                mapping_path = os.path.join("data", "GRN", "Microglia", f"{region}_patient_mapping.csv")
+        else:
+            mapping_path = os.path.join("data", "GRN", "Astrocytes", f"{region}_Astrocytes_patient_mapping.csv")
+            if not os.path.exists(mapping_path):
+                mapping_path = os.path.join("data", "GRN", "Astrocytes", f"{region}_patient_mapping.csv")
+        if os.path.exists(mapping_path):
+            conditions = load_conditions_from_mapping(mapping_path)
+        
+        if conditions is not None:
+            if len(conditions) != n_cells:
+                print(f"    Warning: {len(conditions)} conditions but {n_cells} cells - using None for conditions")
+                conditions = [None] * n_cells
+            all_conditions.extend(conditions)
+        else:
+            all_conditions.extend([None] * n_cells)
+    
+    # Concatenate embeddings
+    if not all_embeddings:
+        raise ValueError(f"No embedding files found matching cell_type_filter={cell_type_filter}")
+    
+    concatenated_embeddings = np.vstack(all_embeddings)
+    print(f"\nConcatenated embeddings shape: {concatenated_embeddings.shape}")
+    print(f"  Total cells: {concatenated_embeddings.shape[0]}")
+    print(f"  Embedding dimensions: {concatenated_embeddings.shape[1]}")
+    if cell_type_filter:
+        print(f"  Filtered by cell type: {cell_type_filter}")
+    
+    # Count cells per label
+    from collections import Counter
+    label_counts = Counter(all_cell_labels)
+    print(f"  Cell groups: {dict(label_counts)}")
+    
+    # Count conditions
+    condition_counts = {}
+    for cond in all_conditions:
+        if cond:
+            condition_counts[cond] = condition_counts.get(cond, 0) + 1
+    if condition_counts:
+        print(f"  Conditions: {condition_counts}")
+    
+    return concatenated_embeddings, all_conditions, all_cell_labels, all_cell_names
 
 
-def plot_stage_distribution_line(percentage_df, title="Stage Distribution Across Clusters"):
-    """Plot line graph showing distribution of each stage across clusters."""
+
+# Determine if we're loading multiple embeddings
+point_colors = None
+color_map = None
+unique_regions = None
+cell_conditions = None
+cell_labels = None
+
+if args.combine_all:
+    # Combine all embeddings, optionally filtered by cell type
+    embeddings_matrix, cell_conditions, cell_labels, cell_names = concatenate_all_embeddings(cell_type_filter=args.cells_to_keep)
+    has_unmapped = any(c is None for c in cell_conditions)
+    if args.cells_to_keep:
+        region_label = f"All Regions ({args.cells_to_keep} only)"
+    else:
+        region_label = "All Regions"
+else:
+    # Load single region
+    region = args.region
+    embeddings_path = os.path.join("GREmLN", "embeddings", f"{region}_cell_embeddings.tsv")
+    embeddings_matrix, cell_names = load_cell_embeddings(embeddings_path)
+    cell_conditions = None
+    # Try to infer cell type from filename
+    if 'Microglia' in embeddings_path:
+        cell_labels = [f"{region}_Microglia"] * len(cell_names)
+    else:
+        cell_labels = [region] * len(cell_names)  # Default to region name
+    region_label = region
+
+print(f"Embedding matrix shape: {embeddings_matrix.shape}")
+print(f"  - Number of cells: {embeddings_matrix.shape[0]}")
+print(f"  - Embedding dimensions: {embeddings_matrix.shape[1]}")
+
+# Test different UMAP dimensions to find optimal (using n_clusters=2 for testing)
+umap_dimensions_to_test = [2] #[2, 4, 8, 16]
+max_umap = min(50, embeddings_matrix.shape[1], embeddings_matrix.shape[0] - 1)
+umap_dimensions_to_test = [d for d in umap_dimensions_to_test if d <= max_umap]
+
+print(f"\nTesting UMAP dimensions: {umap_dimensions_to_test} (using n_clusters=2 for testing)...")
+umap_results = {}
+best_umap_dim = None
+best_silhouette = -1
+test_n_clusters = 2  # Use 2 for dimension testing
+
+for n_comp in umap_dimensions_to_test:
+    print(f"  Computing UMAP {n_comp}D...")
+    reducer_test = umap.UMAP(n_components=n_comp, random_state=42, n_neighbors=15, min_dist=0.1)
+    embeddings_test = reducer_test.fit_transform(embeddings_matrix)
+    
+    # Test clustering
+    clusterer_test = KMeans(n_clusters=test_n_clusters, random_state=42, n_init=10)
+    cluster_labels_test = clusterer_test.fit_predict(embeddings_test)
+    silhouette_avg = silhouette_score(embeddings_test, cluster_labels_test)
+    
+    umap_results[n_comp] = silhouette_avg
+    print(f"  UMAP {n_comp}D: silhouette_score={silhouette_avg:.4f}")
+    
+    if silhouette_avg > best_silhouette:
+        best_silhouette = silhouette_avg
+        best_umap_dim = n_comp
+
+print(f"\nOptimal UMAP dimension: {best_umap_dim}D (silhouette_score: {best_silhouette:.4f})")
+
+# Plot UMAP dimension comparison
+if len(umap_results) > 1:
     fig, ax = plt.subplots(figsize=(10, 6))
+    umap_dims = list(umap_results.keys())
+    silhouettes = list(umap_results.values())
     
-    clusters = sorted(percentage_df.index.tolist())
-    stages = sorted(percentage_df.columns.tolist())
-    
-    stage_colors = {
-        '1': 'green',
-        '2': 'lightgreen',
-        '3': 'orange',
-        '4': 'red'
-    }
-    
-    for stage in stages:
-        percentages = [percentage_df.loc[cluster, stage] for cluster in clusters]
-        color = stage_colors.get(stage, 'gray')
-        ax.plot(clusters, percentages, marker='o', label=f'Stage {stage}', 
-                color=color, linewidth=2, markersize=8)
-    
-    ax.set_xlabel('Cluster', fontsize=12)
-    ax.set_ylabel('Percentage of Stage in Cluster (%)', fontsize=12)
-    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.plot(umap_dims, silhouettes, marker='o', linewidth=2, markersize=8, color='purple')
+    ax.axvline(x=best_umap_dim, color='r', linestyle='--', linewidth=2, label=f'Optimal: {best_umap_dim}D')
+    ax.set_xlabel('UMAP Dimensions', fontsize=12)
+    ax.set_ylabel('Silhouette Score', fontsize=12)
+    ax.set_title('Silhouette Score vs UMAP Dimensions', fontsize=14, fontweight='bold')
     ax.legend(loc='best', fontsize=10)
     ax.grid(True, alpha=0.3)
-    ax.set_xticks(clusters)
+    ax.set_xticks(umap_dims)
     plt.tight_layout()
-    return fig
+    plt.show()
 
+# Use optimal UMAP dimension for clustering
+print(f"\nUsing {best_umap_dim}D UMAP for clustering...")
+reducer_optimal = umap.UMAP(n_components=best_umap_dim, random_state=42, n_neighbors=15, min_dist=0.1)
+embeddings_optimal = reducer_optimal.fit_transform(embeddings_matrix)
 
-# Load data
-embeddings_path = os.path.join("GREmLN", "embeddings", "EC_cell_embeddings.tsv")
-embeddings_matrix = load_cell_embeddings(embeddings_path)
+# Use 4 clusters directly
+n_clusters = 7
 
-# Load AnnData with TF scores
-tf_adata_path = os.path.join("data", "GRN", "EC_AnnData_tf_scores.h5ad")
-print(f"Loading AnnData with TF scores from {tf_adata_path}...")
-tf_adata = sc.read_h5ad(tf_adata_path)
-
-# Extract top TF for each cell (should be in same order as embeddings)
-if 'top_tf' not in tf_adata.obs.columns:
-    raise ValueError("'top_tf' column not found in AnnData. Run find_TF_score.py first.")
-    
-cell_tfs = tf_adata.obs['top_tf'].values.tolist()
-cell_tfs = [str(tf) if pd.notna(tf) else None for tf in cell_tfs]
-
-unique_tfs, tf_to_color, point_colors = create_tf_color_mapping(cell_tfs)
-has_unmapped = any(tf is None for tf in cell_tfs)
-
-# Still load conditions for stage distribution analysis
-mapping_path = os.path.join("data", "GRN", "Astrocytes", "EC_Astrocytes_patient_mapping.csv")
-cell_conditions = load_conditions_from_mapping(mapping_path)
-unique_conditions, condition_to_color, _ = create_color_mapping(cell_conditions)
-
-if len(cell_tfs) != embeddings_matrix.shape[0]:
-    raise ValueError(f"Cell count mismatch: embeddings has {embeddings_matrix.shape[0]} cells, "
-                    f"but TF data has {len(cell_tfs)} cells")
-
-# Cluster embeddings
-print("Clustering embeddings...")
-cluster_labels = cluster_embeddings(embeddings_matrix, n_clusters=5)
-n_clusters_found = len(np.unique(cluster_labels))
-print(f"Found {n_clusters_found} clusters")
-
-# Calculate silhouette score
-silhouette_avg = silhouette_score(embeddings_matrix, cluster_labels)
+# Cluster embeddings with 4 clusters
+print(f"\nClustering with n_clusters={n_clusters} on {best_umap_dim}D UMAP...")
+clusterer = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+cluster_labels = clusterer.fit_predict(embeddings_optimal)
+silhouette_avg = silhouette_score(embeddings_optimal, cluster_labels)
 print(f"Silhouette score: {silhouette_avg:.4f}")
 
-# Calculate and print TF distribution
-print("\nCalculating TF distribution within clusters...")
-cluster_tf_counts, top_tf_per_cluster, top_tf_counts, top_tf_percentages = calculate_tf_distribution(cluster_labels, cell_tfs)
+# Count cells per cluster
+from collections import Counter
+cluster_counts = Counter(cluster_labels)
+print(f"\nCells per cluster:")
+for cluster_id in sorted(cluster_counts.keys()):
+    print(f"  Cluster {cluster_id}: {cluster_counts[cluster_id]} cells")
 
-print("\nTop TF in Each Cluster:")
-for cluster in sorted(cluster_tf_counts.index):
-    top_tf = top_tf_per_cluster[cluster]
-    count = top_tf_counts[cluster]
-    percentage = top_tf_percentages[cluster]
-    print(f"  Cluster {cluster}: {top_tf} ({count} cells, {percentage:.1f}%)")
+# Save each cluster to a separate file
+print(f"\nSaving clusters to separate files:")
+all_cluster_ids = sorted(cluster_counts.keys())
 
-print("\nTF Distribution Across Clusters (counts):")
-print(cluster_tf_counts)
+"""for cluster_id in all_cluster_ids:
+    cluster_cell_indices = [i for i, label in enumerate(cluster_labels) if label == cluster_id]
+    cluster_cell_names = [cell_names[i] for i in cluster_cell_indices]
+    
+    # Save this cluster to a separate file
+    cluster_pickle = f"data/Astrocyte_cluster_{cluster_id}_cells.pkl"
+    print(f"  Saving cluster {cluster_id} ({len(cluster_cell_names)} cells) to: {cluster_pickle}")
+    with open(cluster_pickle, 'wb') as f:
+        pickle.dump({
+            'cluster_id': cluster_id,
+            'cell_names': cluster_cell_names,
+            'n_cells': len(cluster_cell_names)
+        }, f)
+    print(f"  ✓ Saved {len(cluster_cell_names)} cells from cluster {cluster_id}")
 
-# Compute UMAP
-print("\nComputing UMAP...")
-reducer = umap.UMAP(n_components=2, random_state=42, n_neighbors=15, min_dist=0.1)
-embeddings_2d_umap = reducer.fit_transform(embeddings_matrix)
+print(f"\n✓ All {len(all_cluster_ids)} clusters saved successfully")"""
 
-# Plot embedding colored by top TF
-fig, ax = plt.subplots(figsize=(10, 8))
-ax.scatter(embeddings_2d_umap[:, 0], embeddings_2d_umap[:, 1], c=point_colors, alpha=0.5, s=10)
-ax.set_xlabel('UMAP Dimension 1')
-ax.set_ylabel('UMAP Dimension 2')
-ax.set_title('EC Cell Embeddings - UMAP (Colored by Top TF)')
+# Compute 2D UMAP for visualization
+print("\nComputing 2D UMAP for visualization...")
+reducer_2d = umap.UMAP(n_components=2, random_state=42, n_neighbors=15, min_dist=0.1)
+embeddings_2d = reducer_2d.fit_transform(embeddings_matrix)
+
+# Plot embedding
+fig, ax = plt.subplots(figsize=(12, 10))
+
+# Determine coloring scheme
+if args.color_by == 'cell_type' and cell_labels is not None:
+    plot_colors, color_map, unique_values, extracted_values = create_color_mapping(cell_labels, attribute_type='cell_type')
+    title_suffix = 'Cell Type'
+    label_prefix = ''
+elif args.color_by == 'region' and cell_labels is not None:
+    plot_colors, color_map, unique_values, extracted_values = create_color_mapping(cell_labels, attribute_type='region')
+    title_suffix = 'Region'
+    label_prefix = ''
+elif args.color_by == 'condition' and cell_conditions is not None:
+    plot_colors, color_map, unique_values, extracted_values = create_color_mapping(cell_conditions, attribute_type='condition')
+    title_suffix = 'Condition'
+    label_prefix = 'Condition '
+else:
+    plot_colors = None
+
+if plot_colors is not None:
+    # Plot with colors
+    scatter = ax.scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], c=plot_colors, alpha=0.6, s=20)
+    title = f'{region_label} Cell Embeddings - UMAP (Colored by {title_suffix})'
+    
+    # Create legend
+    legend_elements = []
+    value_counts = Counter(extracted_values)
+    for value in unique_values:
+        color = color_map[value]
+        count = value_counts.get(value, 0)
+        legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', 
+                                           markerfacecolor=color, markersize=10, 
+                                           label=f'{label_prefix}{value} (n={count})'))
+    ax.legend(handles=legend_elements, loc='best', fontsize=10)
+    
+else:
+    # Default: Color by cluster
+    scatter = ax.scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], c=cluster_labels, alpha=0.6, s=20, cmap='tab10')
+    title = f'{region_label} Cell Embeddings - UMAP (Clustered on {best_umap_dim}D, {n_clusters} clusters, Silhouette: {silhouette_avg:.4f})'
+    
+    # Add legend for clusters
+    unique_clusters = sorted(set(cluster_labels))
+    legend_elements = []
+    for cluster_id in unique_clusters:
+        color = plt.cm.tab10(cluster_id / max(1, max(unique_clusters)))
+        count = cluster_counts[cluster_id]
+        legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', 
+                                           markerfacecolor=color, markersize=10, 
+                                           label=f'Cluster {cluster_id} (n={count})'))
+    ax.legend(handles=legend_elements, loc='best', fontsize=10)
+
+ax.set_xlabel('UMAP Dimension 1', fontsize=12)
+ax.set_ylabel('UMAP Dimension 2', fontsize=12)
+ax.set_title(title, fontsize=14, fontweight='bold')
 ax.grid(True, alpha=0.3)
-ax.legend(handles=create_tf_legend(unique_tfs, tf_to_color, has_unmapped), 
-          loc='best', fontsize=6, ncol=2)
-plt.tight_layout()
-plt.show()
 
-# Plot embedding colored by cluster
-fig, ax = plt.subplots(figsize=(10, 8))
-unique_clusters = sorted(np.unique(cluster_labels))
-n_clusters = len(unique_clusters)
-
-# Create discrete boundaries for the colormap
-boundaries = np.array(unique_clusters + [unique_clusters[-1] + 1]) - 0.5
-norm = BoundaryNorm(boundaries, n_clusters)
-
-scatter = ax.scatter(embeddings_2d_umap[:, 0], embeddings_2d_umap[:, 1], 
-                    c=cluster_labels, cmap='tab10', norm=norm, alpha=0.6, s=20)
-ax.set_xlabel('UMAP Dimension 1')
-ax.set_ylabel('UMAP Dimension 2')
-ax.set_title('EC Cell Embeddings - UMAP (Colored by Cluster)')
-ax.grid(True, alpha=0.3)
-
-# Create discrete colorbar
-cbar = plt.colorbar(scatter, ax=ax, label='Cluster', ticks=unique_clusters, boundaries=boundaries)
-cbar.set_ticklabels(unique_clusters)
 plt.tight_layout()
 plt.show()

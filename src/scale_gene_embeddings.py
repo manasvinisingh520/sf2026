@@ -11,16 +11,23 @@ import argparse
 import os
 import anndata as ad
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+import umap
+HAS_UMAP = True
 
 
 def load_gene_embeddings(embeddings_path):
     """
-    Load gene embeddings from TSV file.
+    Load gene embeddings from TSV/CSV file.
+    
+    Format: First row is header (starts with comma, then dimension indices: ,0,1,2,3,...)
+    Subsequent rows: gene ID in first column, embedding values in remaining columns.
+    File is comma-separated.
     
     Parameters:
     -----------
     embeddings_path : str
-        Path to gene embeddings TSV file
+        Path to gene embeddings file
         
     Returns:
     --------
@@ -29,15 +36,22 @@ def load_gene_embeddings(embeddings_path):
     """
     print(f"Loading gene embeddings from: {embeddings_path}")
     
-    # Read TSV file
-    df = pd.read_csv(embeddings_path, sep='\t', header=0)
+    # Read CSV file with header (first row contains dimension indices)
+    # First column will be unnamed/empty in header, then 0,1,2,3... for dimensions
+    try:
+        df = pd.read_csv(embeddings_path, sep=',', header=0)
+    except:
+        # Try tab-separated as fallback
+        df = pd.read_csv(embeddings_path, sep='\t', header=0)
     
-    # First column should be gene IDs, rest are embedding dimensions
-    df = df.iloc[1:].copy()
+    # First column contains gene IDs (may be named 'Unnamed: 0' or similar)
+    # Get the first column name (should be the gene ID column)
+    first_col_name = df.columns[0]
+    gene_ids = df[first_col_name].astype(str).values
     
-    # Set first column as index (gene IDs)
-    gene_ids = df.iloc[:, 0].values
-    embedding_data = df.iloc[:, 1:].values.astype(float)
+    # Remaining columns are embedding dimensions
+    embedding_cols = [col for col in df.columns if col != first_col_name]
+    embedding_data = df[embedding_cols].values.astype(float)
     
     # Create DataFrame with gene IDs as index
     embeddings_df = pd.DataFrame(
@@ -126,6 +140,17 @@ def scale_embeddings(embeddings_df, expression_dict):
     print("Scaling embeddings using weight method (embedding * sqrt(log1p(CPM)))")
     print("Using log1p(CPM) expression values directly (no additional normalization)")
     
+    # Debug: Check gene ID formats
+    print(f"\nDebug: Checking gene ID matching...")
+    print(f"  Sample embedding gene IDs (first 5): {list(embeddings_df.index[:5])}")
+    print(f"  Sample AnnData gene IDs (first 5): {list(expression_dict.keys())[:5]}")
+    
+    # Check how many genes match
+    matching_genes = [gid for gid in embeddings_df.index if gid in expression_dict]
+    print(f"  Genes in embeddings: {len(embeddings_df)}")
+    print(f"  Genes in AnnData: {len(expression_dict)}")
+    print(f"  Matching genes: {len(matching_genes)}")
+
     # Get expression values for genes in embeddings
     expression_values = []
     
@@ -159,6 +184,82 @@ def scale_embeddings(embeddings_df, expression_dict):
     print(f"  {len(scaled_embeddings_df) - n_expressed} genes had zero expression (embeddings set to zero)")
     
     return scaled_embeddings_df
+
+
+def plot_before_after(embeddings_df, scaled_embeddings_df, expression_dict, cell_id, output_dir=None):
+    """
+    Plot before and after visualization of gene embeddings using UMAP or PCA.
+    
+    Parameters:
+    -----------
+    embeddings_df : pd.DataFrame
+        Original embeddings DataFrame
+    scaled_embeddings_df : pd.DataFrame
+        Scaled embeddings DataFrame
+    expression_dict : dict
+        Dictionary mapping gene ID to expression level
+    cell_id : str
+        Cell ID (for title)
+    output_dir : str, optional
+        Directory to save plot (if None, displays plot)
+    """
+    print("\nGenerating before/after visualization...")
+    
+    # Get expression values for coloring
+    expression_values = []
+    for gene_id in embeddings_df.index:
+        if gene_id in expression_dict:
+            expression_values.append(expression_dict[gene_id])
+        else:
+            expression_values.append(0.0)
+    expression_array = np.array(expression_values)
+    
+    # Reduce dimensionality for visualization
+    original_embeddings = embeddings_df.values
+    scaled_embeddings = scaled_embeddings_df.values
+    
+    print("  Computing UMAP for visualization...")
+    reducer = umap.UMAP(n_components=2, random_state=42, n_neighbors=15, min_dist=0.1)
+    original_2d = reducer.fit_transform(original_embeddings)
+    scaled_2d = reducer.fit_transform(scaled_embeddings)
+    method_name = "UMAP"
+    
+    # Create figure with two subplots
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    
+    # Plot original embeddings
+    ax1 = axes[0]
+    scatter1 = ax1.scatter(
+        original_2d[:, 0], original_2d[:, 1],
+        c=expression_array, cmap='viridis', alpha=0.6, s=20
+    )
+    ax1.set_xlabel(f'{method_name} Dimension 1', fontsize=12)
+    ax1.set_ylabel(f'{method_name} Dimension 2', fontsize=12)
+    ax1.set_title(f'Before Scaling\n(Cell: {cell_id})', fontsize=14, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    plt.colorbar(scatter1, ax=ax1, label='log1p(CPM) Expression')
+    
+    # Plot scaled embeddings
+    ax2 = axes[1]
+    scatter2 = ax2.scatter(
+        scaled_2d[:, 0], scaled_2d[:, 1],
+        c=expression_array, cmap='viridis', alpha=0.6, s=20
+    )
+    ax2.set_xlabel(f'{method_name} Dimension 1', fontsize=12)
+    ax2.set_ylabel(f'{method_name} Dimension 2', fontsize=12)
+    ax2.set_title(f'After Scaling (×√expression)\n(Cell: {cell_id})', fontsize=14, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    plt.colorbar(scatter2, ax=ax2, label='log1p(CPM) Expression')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Print some statistics
+    print(f"\n  Visualization statistics:")
+    print(f"    Original embedding range: [{np.min(original_embeddings):.4f}, {np.max(original_embeddings):.4f}]")
+    print(f"    Scaled embedding range: [{np.min(scaled_embeddings):.4f}, {np.max(scaled_embeddings):.4f}]")
+    print(f"    Expression range: [{np.min(expression_array):.4f}, {np.max(expression_array):.4f}]")
+    print(f"    Genes with expression > 0: {np.sum(expression_array > 0)} / {len(expression_array)}")
 
 
 def save_scaled_embeddings(scaled_embeddings_df, output_path):
@@ -207,7 +308,8 @@ def main():
     parser.add_argument(
         '-anndata',
         type=str,
-        required=True,
+        required=False,
+        default='data\model_data\EC_AnnData_perCell.h5ad',
         help='Path to AnnData file (.h5ad) containing expression data'
     )
     parser.add_argument(
@@ -223,6 +325,17 @@ def main():
         default=None,
         help='Output file path pattern (default: adds "_scaled_{cell_id}" before extension for each cell)'
     )
+    parser.add_argument(
+        '-plot',
+        action='store_true',
+        help='Generate before/after visualization plots'
+    )
+    parser.add_argument(
+        '-plot_dir',
+        type=str,
+        default=None,
+        help='Directory to save plots (if not provided and -plot is set, displays plots)'
+    )
     
     args = parser.parse_args()
     
@@ -237,6 +350,14 @@ def main():
     print(f"\nLoading AnnData from: {args.anndata}")
     adata = ad.read_h5ad(args.anndata)
     print(f"AnnData shape: {adata.shape} (cells × genes)")
+    
+    # Print example cell IDs
+    print(f"\nAvailable cell IDs (showing first 10):")
+    for i, cell_id in enumerate(adata.obs_names[:10]):
+        print(f"  {i+1}. {cell_id}")
+    if len(adata.obs_names) > 10:
+        print(f"  ... and {len(adata.obs_names) - 10} more cells")
+    print(f"Total cells: {len(adata.obs_names)}")
     
     # Process each cell separately
     base, ext = os.path.splitext(args.path)
@@ -255,6 +376,16 @@ def main():
             expression_dict
         )
         
+        # Generate visualization if requested
+        if args.plot:
+            plot_before_after(
+                embeddings_df,
+                scaled_embeddings_df,
+                expression_dict,
+                cell_id,
+                output_dir=args.plot_dir
+            )
+        
         # Determine output path
         if args.output is None:
             # Create output path with cell ID
@@ -265,7 +396,7 @@ def main():
             output_path = f"{output_base}_{cell_id}{output_ext}"
         
         # Save scaled embeddings
-        save_scaled_embeddings(scaled_embeddings_df, output_path)
+        #save_scaled_embeddings(scaled_embeddings_df, output_path)
     
     print("\n" + "="*60)
     print(f"Complete! Created {len(args.cell_ids)} scaled embedding file(s)")

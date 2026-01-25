@@ -21,8 +21,15 @@ import re
 import hashlib
 import pickle
 import os
+import time
 import config as cfg
+from sklearn.decomposition import PCA
 
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
 
 def read_mtx_file(mtx_path, row_annotation_path=None, col_annotation_path=None, 
                   transpose=True, make_gene_names_unique=True):
@@ -109,7 +116,6 @@ def read_mtx_file(mtx_path, row_annotation_path=None, col_annotation_path=None,
             print(f"Warning: Could not load column annotations: {e}")
     
     return matrix, gene_names, cell_names
-
 
 def read_excel_columns(
     file_path: str,
@@ -274,7 +280,6 @@ def read_excel_columns(
 
     return df
 
-
 def create_anndata_object(matrix, gene_names=None, cell_names=None, obs=None, transpose=False):
     """
     Create an AnnData object (standard format for single-cell analysis).
@@ -318,7 +323,7 @@ def create_anndata_object(matrix, gene_names=None, cell_names=None, obs=None, tr
             adata.obs = obs
 
         # Read gene annotations from gene_annotations.pkl
-        gene_annotations_file = os.path.join(cfg.DATA_DIR, "gene_annotations.pkl")
+        gene_annotations_file = os.path.join("data", "gene_annotations.pkl")
         with open(gene_annotations_file, 'rb') as f:
             gene_annotations = pickle.load(f)
         # Add Gene type to var (gene-level metadata), not obs (cell-level metadata)
@@ -375,7 +380,6 @@ def filter_anndata_object(adata, min_genes=200, min_cells=3, min_counts=None,
 
     return adata
 
-
 # Shuffle an AnnData object based on the seed
 def shuffle_data(adata: anndata.AnnData, seed: int) -> anndata.AnnData:
     rng = np.random.RandomState(seed)
@@ -393,7 +397,6 @@ def shuffle_data(adata: anndata.AnnData, seed: int) -> anndata.AnnData:
         layers={k: v[shuffled_indices] for k, v in adata.layers.items()} if adata.layers else {}
     )
     return shuffled_adata
-
 
 def aggregate_cells_into_pseudobulk(adata, target_cells_per_bin, filter_patients_cell_threshold=80, seed=100, patient_col='SampleName'):
     """
@@ -500,8 +503,6 @@ def aggregate_cells_into_pseudobulk(adata, target_cells_per_bin, filter_patients
     
     return adata_pseudobulk
 
-
-
 def get_region_file_paths(region, data_dir="data", base_prefix="2025-10-22_Astrocytes_{region}"):
     """
     Get file paths for region-specific matrix, row, and column annotation files.
@@ -530,7 +531,6 @@ def get_region_file_paths(region, data_dir="data", base_prefix="2025-10-22_Astro
     row_path = (data_dir / f"{prefix}_row_annotation.txt").resolve()
     col_path = (data_dir / f"{prefix}_cell_annotation.txt").resolve()
     return mtx_path, row_path, col_path
-
 
 def filter_cells(matrix, cell_names, metadata, mito_max=0.15, extra_filter = False):
     """
@@ -602,7 +602,6 @@ def filter_cells(matrix, cell_names, metadata, mito_max=0.15, extra_filter = Fal
     
     return filtered_matrix, filtered_cell_names, filtered_metadata
 
-
 def min_max_normalize(matrix):
     mat = matrix.tocoo(copy=True).astype(float) #coordinate format
     # Convert to CSR for efficient row operations, then get max/min as dense arrays
@@ -613,7 +612,6 @@ def min_max_normalize(matrix):
     denom[denom == 0] = 1.0  # Avoid divide by zero
     mat.data = (mat.data - row_min[mat.row]) / denom[mat.row]
     return mat.tocsr()
-
 
 def get_top_k_genes(df: pd.DataFrame, k: int, sort_by: str = 'padj', padj_threshold: float = 0.05, log2fc_threshold: float = 1) -> set:
     df_clean = df[df[sort_by].notna()].copy()
@@ -709,54 +707,186 @@ def get_DEGs(region, top_k=500, cell_type="Astrocytes", disable_intersection=Fal
     
     return list(common_genes)
 
-
-def assay_names(adata):
+def get_grn_file_paths(region, cell_type="Astrocytes", data_dir="data"):
     """
-    Get assay/layer names from AnnData object (equivalent to R's assayNames(sce)).
+    Construct file paths for GRN files (GRN.tsv, matrix.csv, AnnData.h5ad) based on region and cell type.
     
     Parameters:
     -----------
-    adata : AnnData
-        AnnData object
+    region : str
+        Region name (e.g., "V1", "EC", "ITG", "PFC", "V2")
+    cell_type : str
+        Cell type (e.g., "Astrocytes", "Microglia"). Default: "Astrocytes"
+    data_dir : str
+        Base data directory. Default: "data"
         
     Returns:
     --------
-    assay_names : list
-        List of assay/layer names. Always includes 'X' (main matrix),
-        followed by any additional layers.
+    tuple
+        Tuple of (grn_file, matrix_file, anndata_file, grn_output, matrix_output, anndata_output)
+        Output files are the same as input files but with "_ensembl" suffix before extension
     """
-    from anndata import AnnData
-    if not isinstance(adata, AnnData):
-        raise TypeError(f"Expected AnnData object, got {type(adata)}")
+    grn_dir = os.path.join(data_dir, 'GRN', cell_type)
     
-    # Main matrix is always 'X'
-    names = ['X']
+    # Construct filenames based on cell_type (Microglia has "_Microglia_" in filename)
+    if cell_type == "Microglia":
+        grn_file = os.path.join(grn_dir, f'{region}_Microglia_GRN.tsv')
+        matrix_file = os.path.join(grn_dir, f'{region}_Microglia_matrix.csv')
+        anndata_file = os.path.join(grn_dir, f'{region}_Microglia_AnnData.h5ad')
+        # Output files
+        grn_output = os.path.join(grn_dir, f'{region}_Microglia_GRN_ensembl.tsv')
+        matrix_output = os.path.join(grn_dir, f'{region}_Microglia_matrix_ensembl.csv')
+        anndata_output = os.path.join(grn_dir, f'{region}_Microglia_AnnData_ensembl.h5ad')
+    else:
+        grn_file = os.path.join(grn_dir, f'{region}_GRN.tsv')
+        matrix_file = os.path.join(grn_dir, f'{region}_matrix.csv')
+        anndata_file = os.path.join(grn_dir, f'{region}_AnnData.h5ad')
+        # Output files
+        grn_output = os.path.join(grn_dir, f'{region}_GRN_ensembl.tsv')
+        matrix_output = os.path.join(grn_dir, f'{region}_matrix_ensembl.csv')
+        anndata_output = os.path.join(grn_dir, f'{region}_AnnData_ensembl.h5ad')
     
-    # Add layer names if they exist
-    if adata.layers:
-        names.extend(list(adata.layers.keys()))
-    
-    return names
+    return grn_file, matrix_file, anndata_file, grn_output, matrix_output, anndata_output
 
-
-def colnames_colData(adata):
+def create_color_mapping(attribute_values, attribute_type='auto', custom_colors=None):
     """
-    Get column names from cell metadata (obs) in AnnData object 
-    (equivalent to R's colnames(colData(sce))).
+    Create color mapping for cell embeddings based on different attributes.
     
     Parameters:
     -----------
-    adata : AnnData
-        AnnData object
-        
+    attribute_values : list
+        List of attribute values to color by. Can be:
+        - List of cell labels (format: "region_celltype" or just "region")
+        - List of conditions (e.g., ['1', '2', '3', '4'])
+        - List of regions
+        - List of any categorical values
+    attribute_type : str, default='auto'
+        Type of attribute: 'cell_type', 'region', 'condition', or 'auto'
+        If 'auto', tries to infer from attribute_values
+    custom_colors : dict, optional
+        Custom color mapping dictionary. If provided, uses these colors instead of defaults.
+        Example: {'Astrocytes': '#1f77b4', 'Microglia': '#ff7f0e'}
+    
     Returns:
     --------
-    column_names : list
-        List of column names in adata.obs (cell metadata)
+    point_colors : list
+        List of colors for each cell
+    color_map : dict
+        Dictionary mapping attribute value to color
+    unique_values : list
+        List of unique attribute values found
     """
-    from anndata import AnnData
-    if not isinstance(adata, AnnData):
-        raise TypeError(f"Expected AnnData object, got {type(adata)}")
+    import matplotlib.pyplot as plt
     
-    return list(adata.obs.columns)
+    # Auto-detect attribute type if needed
+    if attribute_type == 'auto':
+        # Check if it looks like cell labels (contains underscores and cell type keywords)
+        sample = attribute_values[0] if attribute_values else ''
+        if isinstance(sample, str) and ('Astrocyte' in sample or 'Microglia' in sample or '_' in sample):
+            # Try to determine if it's cell_type or region
+            if any('_' in str(v) and any(ct in str(v) for ct in ['Astrocytes', 'Microglia']) for v in attribute_values[:10]):
+                attribute_type = 'cell_type'
+            else:
+                attribute_type = 'region'
+        elif isinstance(sample, str) and sample.isdigit():
+            attribute_type = 'condition'
+        else:
+            attribute_type = 'generic'
+    
+    # Extract values based on attribute type
+    if attribute_type == 'cell_type':
+        # Parse cell_labels to extract cell_type
+        extracted_values = []
+        for label in attribute_values:
+            if isinstance(label, str):
+                if '_' in label:
+                    parts = label.rsplit('_', 1)
+                    if parts[-1] in ['Astrocytes', 'Microglia']:
+                        extracted_values.append(parts[-1])
+                    elif 'Microglia' in label:
+                        extracted_values.append('Microglia')
+                    elif 'Astrocyte' in label:
+                        extracted_values.append('Astrocytes')
+                    else:
+                        extracted_values.append('Astrocytes')  # Default
+                else:
+                    extracted_values.append('Astrocytes')  # Default
+            else:
+                extracted_values.append(str(label))
+        attribute_values = extracted_values
+        
+        # Default colors for cell types
+        if custom_colors is None:
+            custom_colors = {
+                'Astrocytes': '#1f77b4',      # Blue
+                'Microglia': '#ff7f0e',       # Orange
+                'Neuron': '#2ca02c',          # Green
+                'Oligodendrocyte': '#d62728',  # Red
+                'Endothelial': '#9467bd',     # Purple
+            }
+    
+    elif attribute_type == 'region':
+        # Parse cell_labels to extract region
+        extracted_values = []
+        for label in attribute_values:
+            if isinstance(label, str):
+                if '_' in label:
+                    parts = label.rsplit('_', 1)
+                    if parts[-1] in ['Astrocytes', 'Microglia']:
+                        extracted_values.append(parts[0])
+                    else:
+                        extracted_values.append(label)
+                else:
+                    extracted_values.append(label)
+            else:
+                extracted_values.append(str(label))
+        attribute_values = extracted_values
+    
+    elif attribute_type == 'condition':
+        # Conditions are usually already in the right format
+        # Default colors for conditions
+        if custom_colors is None:
+            custom_colors = {
+                '1': 'green',
+                '2': 'lightgreen',
+                '3': 'orange',
+                '4': 'red'
+            }
+    
+    # Convert all values to strings for consistency
+    attribute_values = [str(v) if v is not None else 'None' for v in attribute_values]
+    
+    # Get unique values
+    unique_values = sorted(set(attribute_values))
+    print(f"  Found {len(unique_values)} unique {attribute_type} values: {unique_values[:10]}{'...' if len(unique_values) > 10 else ''}")
+    
+    # Create color map
+    cmap = plt.cm.get_cmap('tab20')
+    color_map = {}
+    
+    for idx, value in enumerate(unique_values):
+        if custom_colors and value in custom_colors:
+            color_map[value] = custom_colors[value]
+        else:
+            # Use colormap for values not in custom colors
+            color_map[value] = cmap(idx / max(len(unique_values), 1))
+    
+    # Map each cell to its color
+    point_colors = [color_map.get(val, '#808080') for val in attribute_values]
+    
+    # Return extracted values for counting purposes
+    return point_colors, color_map, unique_values, attribute_values
 
+def scale_embeddings(embeddings_matrix, expression_matrix, n_components=None):
+    # expression_matrix: (n_cells, n_genes) - no need to transpose
+    # embedding_matrix: (n_genes, n_dims)
+    # scaled_embeddings_matrix: (n_cells, n_genes, n_dims)
+
+    # PCA reduction on embeddings matrix
+    pca = PCA(n_components=n_components, random_state=42)
+    embeddings_matrix = pca.fit_transform(embeddings_matrix)
+    # Using similar function to example (expression = d, embedding = A)
+    scaled_embeddings_matrix = expression_matrix[:, :, None] * embeddings_matrix[None, :, :]
+    scaled_embeddings_matrix = scaled_embeddings_matrix.astype('float16')
+    print(f"Scaled embeddings matrix shape: {scaled_embeddings_matrix.shape}")
+    return scaled_embeddings_matrix
