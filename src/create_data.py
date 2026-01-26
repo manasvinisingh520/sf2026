@@ -194,7 +194,7 @@ def main():
 
         for patient_name in unique_patients:
             patient_mask = adata.obs['SampleName'] == patient_name
-            patient_embeddings = region_scaled_embeddings[patient_mask]
+            patient_embeddings = region_scaled_embeddings[patient_mask].astype(np.float16)
             patient_cell_names = adata.obs.index[patient_mask].tolist()
             all_patient_embeddings.append(patient_embeddings)
             all_cell_names.append(patient_cell_names)
@@ -207,7 +207,7 @@ def main():
         kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
         
         embeddings_folds = []
-        cell_names_folds = []
+        patient_info_folds = []
         ptau_folds = []
         thal_folds = []
         
@@ -215,15 +215,15 @@ def main():
         for fold_idx, (_, fold_patient_indices) in enumerate(kf.split(range(n_patients))):
             # Concatenate embeddings from patients in this fold
             fold_embeddings_list = [all_patient_embeddings[i] for i in fold_patient_indices]
-            fold_embeddings = np.concatenate(fold_embeddings_list, axis=0)
+            fold_embeddings = np.concatenate(fold_embeddings_list, axis=0).astype(np.float16)
             
             # Get ptau and thal for patients in this fold (one value per patient)
             fold_ptau = [all_ptau[i] for i in fold_patient_indices]
             fold_thal = [all_thal[i] for i in fold_patient_indices]
-            fold_cell_names = [all_cell_names[i] for i in fold_patient_indices]
+            fold_patient_info = {unique_patients[i]: all_cell_names[i] for i in fold_patient_indices}
             
             embeddings_folds.append(fold_embeddings)
-            cell_names_folds.append(fold_cell_names)
+            patient_info_folds.append(fold_patient_info)
             ptau_folds.append(fold_ptau)
             thal_folds.append(fold_thal)
             
@@ -234,11 +234,11 @@ def main():
         # Save folds
         emb_output_dir = os.path.join("data", "model_data", f"{region}_data_for_model_training.pkl")
         with open(emb_output_dir, "wb") as f:
-            pickle.dump((embeddings_folds, cell_names_folds, ptau_folds, thal_folds), f, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump((embeddings_folds, patient_info_folds, ptau_folds, thal_folds), f, protocol=pickle.HIGHEST_PROTOCOL)
         print(f"Saved {n_folds} folds of rescaled embeddings to {emb_output_dir}")
         print(f"  Each fold contains: embeddings (3D array), patient_info (dict: patient_name -> cell_names), ptau, thal")
-        del embeddings_folds, cell_names_folds, ptau_folds, thal_folds, region_scaled_embeddings
-        del adata, fold_embeddings, fold_cell_names, fold_ptau, fold_thal
+        del embeddings_folds, patient_info_folds, ptau_folds, thal_folds, region_scaled_embeddings
+        del adata, fold_embeddings, fold_patient_info, fold_ptau, fold_thal
         del all_patient_embeddings, all_cell_names, all_ptau, all_thal
         del unique_patients
         gc.collect()
