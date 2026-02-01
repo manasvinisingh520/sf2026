@@ -8,6 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import umap
 import argparse
+from utils import create_color_mapping
 
 
 def load_gene_embeddings(embeddings_path):
@@ -126,6 +127,10 @@ parser = argparse.ArgumentParser(description='Plot gene embeddings using UMAP vi
 parser.add_argument('--region', type=str, default='EC', help='Region to process (default: EC). Can specify multiple regions separated by commas.')
 parser.add_argument('--embeddings_path', type=str, default=None, help='Path to embeddings file (default: auto-detect)')
 parser.add_argument('--combine_all', action='store_true', help='Combine all gene embeddings from all regions (Astrocytes and Microglia)')
+parser.add_argument('--cell_type', type=str, default=None, choices=['Astrocytes', 'Microglia'],
+                    help='Filter by cell type (Astrocytes or Microglia). If not specified, includes all cell types.')
+parser.add_argument('--color_by', type=str, default='auto', choices=['cell_type', 'region', 'none', 'auto'],
+                    help='What to color by: cell_type, region, none (single color), or auto (detect from data)')
 args = parser.parse_args()
 
 # Determine if we're loading multiple embeddings
@@ -146,6 +151,22 @@ else:
     
     embeddings_matrix, gene_ids = load_gene_embeddings(embeddings_path)
     region_label = region
+    gene_labels = None
+    cell_types = None
+
+# Filter by cell_type if specified
+if args.cell_type is not None:
+    if cell_types is None:
+        print(f"Warning: cell_type filter specified but no cell type information available. Ignoring filter.")
+    else:
+        # Filter embeddings, gene_ids, gene_labels, and cell_types
+        mask = np.array([ct == args.cell_type for ct in cell_types])
+        embeddings_matrix = embeddings_matrix[mask]
+        gene_ids = [gene_ids[i] for i in range(len(gene_ids)) if mask[i]]
+        if gene_labels is not None:
+            gene_labels = [gene_labels[i] for i in range(len(gene_labels)) if mask[i]]
+        cell_types = [cell_types[i] for i in range(len(cell_types)) if mask[i]]
+        print(f"Filtered to {args.cell_type}: {len(gene_ids)} genes")
 
 print(f"Embedding matrix shape: {embeddings_matrix.shape}")
 print(f"  - Number of genes: {embeddings_matrix.shape[0]}")
@@ -156,21 +177,57 @@ print("\nComputing UMAP for visualization...")
 reducer = umap.UMAP(n_components=2, random_state=42, n_neighbors=15, min_dist=0.1)
 embeddings_2d = reducer.fit_transform(embeddings_matrix)
 
-# Color by cell type if combining all, otherwise use single color
+# Determine coloring scheme based on color_by argument
 from matplotlib.patches import Patch
 
-if args.combine_all and cell_types:
-    # Create color mapping: Astrocytes = blue, Microglia = red
-    cell_type_colors = {
-        'Astrocytes': '#1f77b4',  # Blue
-        'Microglia': '#d62728'     # Red
-    }
-    
-    point_colors = [cell_type_colors[ct] for ct in cell_types]
-    title = f'{region_label} Gene Embeddings - UMAP (Colored by Cell Type)'
-else:
+if args.color_by == 'none':
     point_colors = 'gray'
     title = f'{region_label} Gene Embeddings - UMAP'
+    color_map = None
+    unique_values = None
+elif args.color_by == 'cell_type' and cell_types is not None:
+    # If cell_types are already simple strings (not labels with underscores), use 'generic' type with custom colors
+    # Otherwise use 'cell_type' to extract from labels
+    if cell_types and not any('_' in str(ct) for ct in cell_types[:10]):
+        # Already extracted cell types, use generic with custom colors
+        custom_colors = {
+            'Astrocytes': '#1f77b4',      # Blue
+            'Microglia': '#ff7f0e',       # Orange
+        }
+        point_colors, color_map, unique_values, _ = create_color_mapping(cell_types, attribute_type='generic', custom_colors=custom_colors)
+    else:
+        point_colors, color_map, unique_values, _ = create_color_mapping(cell_types, attribute_type='cell_type')
+    title = f'{region_label} Gene Embeddings - UMAP (Colored by Cell Type)'
+elif args.color_by == 'region' and gene_labels is not None:
+    point_colors, color_map, unique_values, _ = create_color_mapping(gene_labels, attribute_type='region')
+    title = f'{region_label} Gene Embeddings - UMAP (Colored by Region)'
+elif args.color_by == 'auto':
+    # Auto-detect: use cell_type if available, otherwise region, otherwise single color
+    if cell_types is not None:
+        # If cell_types are already simple strings (not labels with underscores), use 'generic' type with custom colors
+        if cell_types and not any('_' in str(ct) for ct in cell_types[:10]):
+            custom_colors = {
+                'Astrocytes': '#1f77b4',      # Blue
+                'Microglia': '#ff7f0e',       # Orange
+            }
+            point_colors, color_map, unique_values, _ = create_color_mapping(cell_types, attribute_type='generic', custom_colors=custom_colors)
+        else:
+            point_colors, color_map, unique_values, _ = create_color_mapping(cell_types, attribute_type='cell_type')
+        title = f'{region_label} Gene Embeddings - UMAP (Colored by Cell Type)'
+    elif gene_labels is not None:
+        point_colors, color_map, unique_values, _ = create_color_mapping(gene_labels, attribute_type='region')
+        title = f'{region_label} Gene Embeddings - UMAP (Colored by Region)'
+    else:
+        point_colors = 'gray'
+        title = f'{region_label} Gene Embeddings - UMAP'
+        color_map = None
+        unique_values = None
+else:
+    # Fallback to single color
+    point_colors = 'gray'
+    title = f'{region_label} Gene Embeddings - UMAP'
+    color_map = None
+    unique_values = None
 
 # Plot embedding
 fig, ax = plt.subplots(figsize=(12, 10))
@@ -178,15 +235,13 @@ ax.scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], c=point_colors, alpha=0.6, 
 ax.set_xlabel('UMAP Dimension 1', fontsize=12)
 ax.set_ylabel('UMAP Dimension 2', fontsize=12)
 ax.set_title(title, fontsize=14, fontweight='bold')
+ax.set_xlim(-5, 25)
+ax.set_ylim(-15, 15)
 ax.grid(True, alpha=0.3)
 
-# Add legend if combining all regions
-if args.combine_all and cell_types:
-    cell_type_colors = {
-        'Astrocytes': '#1f77b4',  # Blue
-        'Microglia': '#d62728'     # Red
-    }
-    legend_elements = [Patch(facecolor=cell_type_colors[ct], label=ct) for ct in ['Astrocytes', 'Microglia'] if ct in set(cell_types)]
+# Add legend if we have a color mapping
+if color_map is not None and unique_values is not None:
+    legend_elements = [Patch(facecolor=color_map[val], label=val) for val in unique_values]
     ax.legend(handles=legend_elements, loc='best', fontsize=10)
 
 plt.tight_layout()

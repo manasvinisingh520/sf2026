@@ -62,3 +62,5 @@ Thumbs.db
 # remove generated files
 *.pkl
 cache/*
+runs/*
+events.out.tfevents*

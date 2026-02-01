@@ -1,0 +1,294 @@
+"""Save region-specific raw gene expression data with Thal and ptau, separated by patient.
+Similar format to create_data.py but saves raw expression instead of scaled embeddings.
+"""
+
+import pandas as pd
+import numpy as np
+import os
+import pickle
+import gc
+import argparse
+from sklearn.model_selection import KFold
+from pathlib import Path
+from utils import (
+    get_region_file_paths,
+    read_excel_columns,
+    read_mtx_file,
+    create_anndata_object,
+    get_top_k_genes,
+)
+from config import REGION_TO_TAB, DATA_DIR
+
+
+def load_top_genes_from_dge_union(
+    region: str,
+    cell_type: str,
+    top_k: int,
+    dge_results_dir: str = "E:/sf2026/dge_results/dge_final",
+) -> list[str]:
+    """
+    Load an ordered union of top-k DGE genes for a region from DGE result CSVs.
+
+    We iterate DGE result files for the region, take the (filtered) top-k genes per file
+    using the same criteria as utils.get_top_k_genes, and build an ordered union until
+    we collect `top_k` unique genes.
+    """
+    dge_dir = Path(dge_results_dir)
+    if not dge_dir.exists():
+        raise FileNotFoundError(f"DGE results directory not found: {dge_results_dir}")
+
+    # Match utils.get_DEGs() filename conventions
+    if cell_type == "Microglia":
+        pattern = f"dge_results_microglia_{region}_*.csv"
+    else:
+        pattern = f"dge_results_{region}_*.csv"
+
+    dge_files = sorted(list(dge_dir.glob(pattern)))
+    if not dge_files:
+        raise FileNotFoundError(f"No DGE files found for region={region}, cell_type={cell_type} in {dge_results_dir}")
+
+    # First, get union of all genes from all files (with their padj values)
+    gene_to_min_padj = {}  # Track minimum padj for each gene across all files
+    
+    for dge_file in dge_files:
+        df = pd.read_csv(dge_file, index_col=0)
+        top_list, _top_set = get_top_k_genes(df, k=top_k, sort_by="padj")
+        
+        # Update padj values (keep minimum padj for each gene)
+        for gene in top_list:
+            padj_val = df.loc[gene, 'padj']
+            if gene not in gene_to_min_padj or padj_val < gene_to_min_padj[gene]:
+                gene_to_min_padj[gene] = padj_val
+    
+    # Sort union by padj (ascending = most significant first) and take top_k
+    sorted_genes = sorted(gene_to_min_padj.items(), key=lambda x: x[1])
+    return [gene for gene, _ in sorted_genes[:top_k]]
+
+
+def create_anndata(region, cell_type='Astrocytes'):
+    """Create AnnData object for a given region and cell type."""
+    base_prefix = f"2025-11-16_{cell_type}_{region}"
+    
+    mtx_path, row_annotation_path, col_annotation_path = get_region_file_paths(
+        region,
+        data_dir=DATA_DIR,
+        base_prefix=base_prefix
+    )
+    # Get metadata path
+    metadata_path = os.path.join(DATA_DIR, f"2025-11-16_{cell_type}_metadata.xlsx")
+    
+    # Get tab index for this region
+    tab_index = REGION_TO_TAB.get(region)
+    
+    # Load metadata
+    metadata = read_excel_columns(
+        metadata_path,
+        columns=['cell_annotation', 'Path..Group.', 'SampleName', 'percent.mito', 'RIN', 
+                'Total.Genes.Detected', 'Thal', 'Ptau.Total.Tau..A.U..'],
+        sheet_name=tab_index
+    )
+    print(f"Loaded metadata: {metadata.shape}")
+    
+    # Read the MTX file (genes × cells format)
+    matrix, gene_names, cell_names = read_mtx_file(
+        mtx_path=str(mtx_path),
+        row_annotation_path=str(row_annotation_path),
+        col_annotation_path=str(col_annotation_path),
+        transpose=False  # Keep as genes × cells
+    )
+    print(f"Loaded matrix shape: {matrix.shape} (genes × cells)")
+    
+    # Align metadata with cell_names (set cell_annotation as index)
+    metadata = metadata.set_index('cell_annotation')
+    metadata = metadata.reindex(cell_names)  # Align with cell_names order
+    
+    # Filter cells with unknown Thal category BEFORE creating AnnData
+    valid_cell_mask = (metadata['Thal'] != 'unk').fillna(False)
+    valid_cell_names = metadata[valid_cell_mask].index.tolist()
+    valid_metadata = metadata[valid_cell_mask].copy()
+    
+    # Filter cell_names and matrix to match valid cells
+    cell_indices_to_keep = [i for i, name in enumerate(cell_names) if name in valid_cell_names]
+    filtered_cell_names = [cell_names[i] for i in cell_indices_to_keep]
+    filtered_matrix = matrix[:, cell_indices_to_keep]  # genes × cells
+    
+    # Create AnnData object (transpose=True because matrix is genes × cells)
+    adata = create_anndata_object(
+        matrix=filtered_matrix,
+        gene_names=gene_names,
+        cell_names=filtered_cell_names,
+        obs=valid_metadata,
+        transpose=True  # Matrix is genes × cells, transpose for AnnData
+    )
+    
+    return adata
+
+
+def main(args):
+    # Define regions based on cell type
+    if args.cell_type == "Astrocytes":
+        regions = ["EC", "ITG", "PFC", "V2", "V1"]
+    elif args.cell_type == "Microglia":
+        regions = ["CrossRegion", "EC", "ITG", "PFC", "V2", "V1"]
+    else:
+        raise ValueError(f"Invalid cell type: {args.cell_type}")
+    
+    print("="*80)
+    print(f"Saving Raw Gene Expression Data for All Regions ({args.cell_type})")
+    print(f"{args.n_folds}-Fold Cross-Validation Split with Target Variables")
+    print(f"Regions to process: {regions}")
+    print("="*80)
+    
+    # Iterate through all regions
+    for region in regions:
+        print(f"\n{'='*80}")
+        print(f"Processing {region} ({args.cell_type})")
+        print(f"{'='*80}")
+        
+        try:
+            # Load AnnData for the region
+            print(f"\nLoading data for {region}...")
+            adata = create_anndata(region, cell_type=args.cell_type)
+            print(f"AnnData shape: {adata.shape} (cells × genes)")
+    
+            # Get raw expression matrix (cells × genes)
+            expression_matrix = np.array(adata.X.toarray(), dtype=np.float32)
+            print(f"Expression matrix shape: {expression_matrix.shape}")
+            
+            # Select top genes from DGE union for this region (ordered, capped to top_k_genes)
+            n_top_genes = args.top_k_genes
+            print(f"Selecting up to top {n_top_genes} genes from DGE union for region {region}...")
+            dge_genes = load_top_genes_from_dge_union(
+                region=region,
+                cell_type=args.cell_type,
+                top_k=n_top_genes,
+                dge_results_dir=args.dge_results_dir,
+            )
+
+            # Keep only genes that exist in this AnnData, ordered by DGE significance
+            # Filter dge_genes to only those present in AnnData (preserves DGE order)
+            ordered_present = [g for g in dge_genes if g in adata.var_names]
+            if len(ordered_present) == 0:
+                raise ValueError(f"No DGE genes found in AnnData var_names for region={region}")
+
+            # Subset AnnData to these genes (in DGE order), and rebuild expression_matrix to match
+            adata = adata[:, ordered_present].copy()
+            expression_matrix = np.array(adata.X.toarray(), dtype=np.float32)
+            print(f"  Filtered to {expression_matrix.shape[1]} DGE-union genes. Expression matrix shape: {expression_matrix.shape}")
+            
+            # Extract ptau_info and thal_info from obs
+            ptau_info = adata.obs['Ptau.Total.Tau..A.U..']
+            thal_info = adata.obs['Thal']
+            unique_patients = adata.obs['SampleName'].unique()
+            print(f"Number of unique patients: {len(unique_patients)}")
+            
+            # Verify that the number of cells in the expression matrix matches AnnData
+            if expression_matrix.shape[0] != len(adata.obs):
+                print(f"ERROR: Mismatch! Expression: {expression_matrix.shape[0]} cells, AnnData obs: {len(adata.obs)} cells")
+                continue
+            
+            # Group by patient and aggregate cells (mean across cells per patient)
+            all_patient_expressions = []
+            all_patient_info = {}  # Dictionary: patient_name -> cell_names
+            all_ptau = []
+            all_thal = []
+            
+            for patient_name in unique_patients:
+                patient_mask = adata.obs['SampleName'] == patient_name
+                patient_expression = expression_matrix[patient_mask].astype(np.float32)  # (n_cells_patient, n_genes)
+                patient_cell_names = adata.obs.index[patient_mask].tolist()
+                
+                # Aggregate cells per patient (mean across cells) to get (n_genes,) per patient
+                patient_expression_aggregated = np.mean(patient_expression, axis=0).astype(np.float32)  # (n_genes,)
+                
+                all_patient_expressions.append(patient_expression_aggregated)
+                all_patient_info[patient_name] = patient_cell_names
+                # ptau and thal have only one value per patient, so take the first (or unique) value
+                all_ptau.append(ptau_info[patient_mask].iloc[0])
+                all_thal.append(thal_info[patient_mask].iloc[0])
+            
+            # Split patients into folds
+            n_patients = len(unique_patients)
+            kf = KFold(n_splits=args.n_folds, shuffle=True, random_state=42)
+            
+            expression_folds = []
+            patient_info_folds = []
+            ptau_folds = []
+            thal_folds = []
+            
+            print(f"\nSplitting {n_patients} patients into {args.n_folds} folds...")
+            for fold_idx, (_, fold_patient_indices) in enumerate(kf.split(range(n_patients))):
+                # Stack patient expressions (already aggregated per patient) from patients in this fold
+                fold_expression_list = [all_patient_expressions[i] for i in fold_patient_indices]
+                fold_expression = np.vstack(fold_expression_list).astype(np.float32)  # (n_patients_in_fold, n_genes)
+                
+                # Get ptau and thal for patients in this fold (one value per patient)
+                fold_ptau = [all_ptau[i] for i in fold_patient_indices]
+                fold_thal = [all_thal[i] for i in fold_patient_indices]
+                fold_patient_info = {unique_patients[i]: all_patient_info[unique_patients[i]] for i in fold_patient_indices}
+                
+                expression_folds.append(fold_expression)
+                patient_info_folds.append(fold_patient_info)
+                ptau_folds.append(fold_ptau)
+                thal_folds.append(fold_thal)
+                
+                n_fold_patients = len(fold_patient_indices)
+                n_genes = fold_expression.shape[1]
+                print(f"  Fold {fold_idx + 1}: {n_fold_patients} patients, {n_genes} genes per patient")
+            
+            # Save folds
+            output_dir = os.path.join("data", "model_data")
+            os.makedirs(output_dir, exist_ok=True)
+            
+            output_path = os.path.join(output_dir, f"{region}_raw_expression_data.pkl")
+            with open(output_path, "wb") as f:
+                pickle.dump((expression_folds, patient_info_folds, ptau_folds, thal_folds), f, 
+                            protocol=pickle.HIGHEST_PROTOCOL)
+            
+            print(f"\nSaved {args.n_folds} folds of raw expression data to {output_path}")
+            print(f"  Each fold contains:")
+            print(f"    - expression_folds: List of numpy arrays (n_patients, n_genes) per fold")
+            print(f"      (cells aggregated per patient, top genes from DGE union for the region)")
+            print(f"    - patient_info_folds: List of dicts (patient_name -> cell_names) per fold")
+            print(f"    - ptau_folds: List of ptau values (one per patient) per fold")
+            print(f"    - thal_folds: List of thal values (one per patient) per fold")
+    
+            # Clean up
+            del expression_folds, patient_info_folds, ptau_folds, thal_folds
+            del all_patient_expressions, all_patient_info, all_ptau, all_thal
+            del adata, expression_matrix
+            gc.collect()
+            
+            # Try to get memory info if psutil is available
+            try:
+                import psutil
+                process = psutil.Process()
+                memory_mb = process.memory_info().rss / (1024 * 1024)
+                print(f"Memory after saving: {memory_mb:.2f} MB")
+            except ImportError:
+                print("Memory info not available (psutil not installed)")
+        
+        except Exception as e:
+            print(f"ERROR: Failed to process {region}: {e}")
+            print(f"Skipping {region} and continuing with next region...")
+            continue
+    
+    print(f"\n{'='*80}")
+    print(f"Completed processing all regions for {args.cell_type}")
+    print(f"{'='*80}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Save raw gene expression data with Thal and ptau by patient')
+    parser.add_argument('--cell_type', type=str, default='Astrocytes',
+                       choices=['Astrocytes', 'Microglia'],
+                       help='Cell type to process (Astrocytes or Microglia, default: Astrocytes)')
+    parser.add_argument('--n_folds', type=int, default=8,
+                       help='Number of folds for cross-validation split (default: 8)')
+    parser.add_argument('--top_k_genes', type=int, default=3000,
+                       help='Number of genes to keep from the region DGE union (default: 3000)')
+    parser.add_argument('--dge_results_dir', type=str, default='E:/sf2026/dge_results/dge_final',
+                       help='Directory containing DGE results CSVs (default: results/dge_final)')
+    
+    args = parser.parse_args()
+    main(args)
