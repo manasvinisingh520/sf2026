@@ -1,0 +1,80 @@
+"""Baseline model for Microglia: CERAD and Braak as two classification heads (no regression)."""
+
+import torch
+import torch.nn as nn
+
+# CERAD class order: moderate before frequent (used for string -> index mapping in training)
+CERAD_CLASS_ORDER = ["none", "sparse", "moderate", "frequent"]
+# Braak values in data are 2, 3, 5, 6 -> map to indices 0, 1, 2, 3
+BRAAK_TO_IDX = {2: 0, 3: 1, 5: 2, 6: 3}
+
+
+class BaselineRankingModelMicroglia(nn.Module):
+    """Baseline model with two classification heads: CERAD and Braak (both categories)."""
+
+    def __init__(
+        self,
+        input_dim=16,
+        input_shape=None,
+        n_cerad_classes=None,
+        n_braak_classes=None,
+        use_attention=False,
+        num_heads=1,
+        dropout=0.2,
+    ):
+        super(BaselineRankingModelMicroglia, self).__init__()
+
+        self.use_attention = use_attention
+
+        hidden_dim1 = 8
+        hidden_dim2 = 4
+        hidden_dim3 = 4
+
+        if input_shape is not None and len(input_shape) == 2:
+            n_genes, n_dims = input_shape
+            flattened_dim = n_genes * n_dims
+            self.flatten_input = nn.Flatten()
+
+            if use_attention:
+                self.attention = nn.MultiheadAttention(
+                    embed_dim=n_dims,
+                    num_heads=num_heads,
+                    batch_first=True,
+                    dropout=0.1,
+                )
+            else:
+                self.attention = None
+            first_layer_input = flattened_dim
+        else:
+            self.flatten_input = nn.Identity()
+            self.attention = None
+            first_layer_input = input_dim
+
+        self.shared = nn.Sequential(
+            nn.Linear(first_layer_input, hidden_dim1),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim1, hidden_dim2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim2, hidden_dim3),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+
+        if n_cerad_classes is None or n_braak_classes is None:
+            raise ValueError("n_cerad_classes and n_braak_classes must be specified")
+        self.cerad_head = nn.Linear(hidden_dim3, n_cerad_classes)
+        self.braak_head = nn.Linear(hidden_dim3, n_braak_classes)
+
+    def forward(self, x):
+        if self.use_attention and self.attention is not None and len(x.shape) == 3:
+            x_attn, _ = self.attention(x, x, x)
+            x = self.flatten_input(x_attn)
+        else:
+            x = self.flatten_input(x)
+
+        shared_features = self.shared(x)
+        cerad_pred = self.cerad_head(shared_features)
+        braak_pred = self.braak_head(shared_features)
+        return cerad_pred, braak_pred

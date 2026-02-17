@@ -76,6 +76,6 @@ class BaselineRankingModel(nn.Module):
             x = self.flatten_input(x)
 
         shared_features = self.shared(x)
-        ptau_pred = self.ptau_head(shared_features).squeeze()
+        ptau_pred = self.ptau_head(shared_features).squeeze(-1)
         thal_pred = self.thal_head(shared_features)  # (batch_size, n_thal_classes) with softmax
         return ptau_pred, thal_pred

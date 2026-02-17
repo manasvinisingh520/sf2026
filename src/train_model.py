@@ -129,7 +129,6 @@ def evaluate(model, dataloader, criterion_ptau, criterion_thal, device, idx_to_t
 
 
 def main(args):
-    # Load data
     data_path = os.path.join('data', 'model_data', f'{args.region}_data_for_model_training.pkl')
     print(f"Loading data from {data_path}")
 
@@ -141,11 +140,9 @@ def main(args):
     if args.gene_encoder and args.pooling is not None:
         raise ValueError("--gene_encoder requires pooling=None (no gene pooling); omit --pooling")
 
-    # Setup device
     device = torch.device(args.device)
     print(f"Using device: {device}")
 
-    # Setup loss functions
     if args.gene_encoder:
         criterion_ptau = nn.HuberLoss()
     elif args.loss_ptau == 'mse':
@@ -155,21 +152,17 @@ def main(args):
     elif args.loss_ptau == 'huber':
         criterion_ptau = nn.HuberLoss()
 
-    # Prepare Thal mapping (manual mapping instead of LabelEncoder)
     all_thal_labels = []
     for thal_fold in thal_folds:
         if isinstance(thal_fold, (list, np.ndarray)):
             all_thal_labels.extend(thal_fold)
         else:
             all_thal_labels.extend(thal_fold.values if hasattr(thal_fold, 'values') else thal_fold)
-
-    # Convert all labels to int for consistent mapping
     all_thal_labels_int = [int(x) for x in all_thal_labels]
     thal_classes = sorted(set(all_thal_labels_int))
     thal_to_idx = {c: i for i, c in enumerate(thal_classes)}
     idx_to_thal = {i: c for c, i in thal_to_idx.items()}
     n_thal_classes = len(thal_classes)
-
     criterion_thal = nn.CrossEntropyLoss()
 
     # Prepare patient-level data for all folds first
@@ -224,14 +217,13 @@ def main(args):
         patient_ptau_log = np.log1p(patient_ptau)
         patient_thal_int = [int(t) for t in patient_thal]
         patient_thal_encoded = np.array([thal_to_idx[t] for t in patient_thal_int])
-
-        print(f"  Number of patients: {len(patient_ptau)}")
-
         all_fold_patient_data.append({
             'embeddings': patient_embeddings,
             'ptau': patient_ptau_log,
             'thal': patient_thal_encoded
         })
+
+        print(f"  Number of patients: {len(patient_ptau)}")
 
     # Leave-one-fold-out cross-validation
     fold_results = []
@@ -247,7 +239,6 @@ def main(args):
         train_embeddings = np.concatenate([all_fold_patient_data[i]['embeddings'] for i in train_fold_indices], axis=0)
         train_ptau = np.concatenate([all_fold_patient_data[i]['ptau'] for i in train_fold_indices], axis=0)
         train_thal = np.concatenate([all_fold_patient_data[i]['thal'] for i in train_fold_indices], axis=0)
-
         test_embeddings = all_fold_patient_data[test_fold_idx]['embeddings']
         test_ptau = all_fold_patient_data[test_fold_idx]['ptau']
         test_thal = all_fold_patient_data[test_fold_idx]['thal']
@@ -336,7 +327,9 @@ def main(args):
         attention_suffix = '_attn' if args.attention else ''
         dropout_str = f'_drop{args.dropout}'
         wd_str = f'_wd{args.weight_decay}'
-        log_dir = os.path.join('runs', f'{args.region}_{args.pooling}_{args.loss_ptau}{model_suffix}{attention_suffix}{dropout_str}{wd_str}_testfold{test_fold_idx+1}')
+        exp_id_str = f"_{args.exp_id}" if getattr(args, 'exp_id', None) else ''
+        log_base = getattr(args, 'log_base', 'runs')
+        log_dir = os.path.join(log_base, f'{args.region}_{args.pooling}_{args.loss_ptau}{model_suffix}{attention_suffix}{dropout_str}{wd_str}{exp_id_str}_testfold{test_fold_idx+1}')
         if os.path.exists(log_dir):
             try:
                 import shutil
@@ -355,7 +348,6 @@ def main(args):
                 model, train_loader, criterion_ptau, criterion_thal, optimizer, device,
                 lambda_entropy=args.lambda_entropy if args.gene_encoder else 0.0
             )
-
             test_loss, test_mse, test_mae, test_f1 = evaluate(
                 model, test_loader, criterion_ptau, criterion_thal, device, idx_to_thal
             )
@@ -404,6 +396,8 @@ def main(args):
     print(f"\nAverage F1: {avg_f1:.4f}")
     print(f"Average MSE: {avg_mse:.4f}")
     print(f"Average MAE: {avg_mae:.4f}")
+
+    return avg_f1, avg_mse, avg_mae, fold_results
 
 
 if __name__ == "__main__":

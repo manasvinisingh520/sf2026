@@ -1,7 +1,8 @@
 """Scale all gene embeddings according to cell expression and save in pickle file.
-For Astrocytes only, with 10-fold cross-validation split and target variables.
+Supports Astrocytes and Microglia. 8-fold cross-validation split with target variables.
 """
 
+import argparse
 import pandas as pd
 import numpy as np
 import os
@@ -34,10 +35,11 @@ def load_gene_embeddings(embeddings_path, gene_list: list[str]):
 
     
     # for each gene in gene_list, if the gene is in gene_embedding_dict, keep the embedding
+    # gene_list may be symbols (from adata with symbol var_names) or Ensembl IDs (from save_perCell_AnnData h5ad)
     not_found_genes = []
     embedding_data = {}
     for gene in gene_list:
-        gene_ensembl_id = symbol_to_ensembl.get(gene)
+        gene_ensembl_id = symbol_to_ensembl.get(gene) if not str(gene).startswith("ENSG") else gene
         if gene_ensembl_id in gene_embedding_dict:
             embedding_data[gene] = gene_embedding_dict[gene_ensembl_id]
         else:
@@ -62,94 +64,121 @@ def find_anndata_file(region, cell_type='Astrocytes'):
     
     return None
 
-def create_anndata(region):
-    
+def create_anndata_astrocytes(region):
+    """Build AnnData from MTX + Excel metadata (Astrocytes only)."""
     base_prefix = f"2025-11-16_Astrocytes_{region}"
-    
+
     mtx_path, row_annotation_path, col_annotation_path = get_region_file_paths(
         region,
         data_dir=DATA_DIR,
         base_prefix=base_prefix
     )
-    # Get metadata path
-    metadata_path = os.path.join(DATA_DIR, f"2025-11-16_Astrocytes_metadata.xlsx")
-    
-    # Get tab index for this region
+    metadata_path = os.path.join(DATA_DIR, "2025-11-16_Astrocytes_metadata.xlsx")
     tab_index = REGION_TO_TAB.get(region)
-    
-    # Load metadata
+
     metadata = read_excel_columns(
         metadata_path,
         columns=['cell_annotation', 'Path..Group.', 'SampleName', 'percent.mito', 'RIN', 'Total.Genes.Detected', 'Thal', 'Ptau.Total.Tau..A.U..'],
         sheet_name=tab_index
     )
     print(f"Loaded metadata: {metadata.shape}")
-    
-    # Read the MTX file (genes × cells format)
+
     matrix, gene_names, cell_names = read_mtx_file(
         mtx_path=str(mtx_path),
         row_annotation_path=str(row_annotation_path),
         col_annotation_path=str(col_annotation_path),
-        transpose=False  # Keep as genes × cells
+        transpose=False
     )
     print(f"Loaded matrix shape: {matrix.shape} (genes × cells)")
-    
-    # Align metadata with cell_names (set cell_annotation as index)
+
     metadata = metadata.set_index('cell_annotation')
-    metadata = metadata.reindex(cell_names)  # Align with cell_names order
-    
-    # Filter cells with unknown Thal category BEFORE creating AnnData
+    metadata = metadata.reindex(cell_names)
+
     valid_cell_mask = (metadata['Thal'] != 'unk').fillna(False)
     valid_cell_names = metadata[valid_cell_mask].index.tolist()
     valid_metadata = metadata[valid_cell_mask].copy()
-    
-    # Filter cell_names and matrix to match valid cells
+
     cell_indices_to_keep = [i for i, name in enumerate(cell_names) if name in valid_cell_names]
     filtered_cell_names = [cell_names[i] for i in cell_indices_to_keep]
-    filtered_matrix = matrix[:, cell_indices_to_keep]  # genes × cells
-    
-    # Create AnnData object (transpose=True because matrix is genes × cells)
+    filtered_matrix = matrix[:, cell_indices_to_keep]
+
     adata = create_anndata_object(
         matrix=filtered_matrix,
         gene_names=gene_names,
         cell_names=filtered_cell_names,
         obs=valid_metadata,
-        transpose=True  # Matrix is genes × cells, transpose for AnnData
+        transpose=True
     )
-    
     return adata
 
-def main():
+
+def load_anndata_microglia(region):
+    """Load Microglia per-cell AnnData from pre-built h5ad (metadata is not Excel/sheets)."""
+    path = find_anndata_file(region, cell_type="Microglia")
+    if path is None:
+        raise FileNotFoundError(
+            f"Microglia AnnData not found: data/model_data/{region}_Microglia_AnnData_perCell.h5ad. "
+            "Create it first (e.g. from your Microglia pipeline); metadata for Microglia is CSV/per-region, not Excel."
+        )
+    adata = ad.read_h5ad(path)
+    # Ensure patient column exists (Microglia often uses Donor ID / Donor_ID)
+    if "SampleName" not in adata.obs.columns:
+        if "Donor_ID" in adata.obs.columns:
+            adata.obs["SampleName"] = adata.obs["Donor_ID"].astype(str)
+        elif "Donor ID" in adata.obs.columns:
+            adata.obs["SampleName"] = adata.obs["Donor ID"].astype(str)
+        else:
+            raise ValueError(f"Microglia AnnData must have obs column 'SampleName' or 'Donor_ID'/'Donor ID'. Found: {list(adata.obs.columns)}")
+    if "Thal" not in adata.obs.columns or "Ptau.Total.Tau..A.U.." not in adata.obs.columns:
+        raise ValueError(
+            f"Microglia AnnData must have obs columns 'Thal' and 'Ptau.Total.Tau..A.U..'. "
+            f"Found: {list(adata.obs.columns)}"
+        )
+    valid_cell_mask = (adata.obs["Thal"] != "unk").fillna(False)
+    adata = adata[valid_cell_mask].copy()
+    print(f"Loaded Microglia AnnData: {adata.shape} from {path}")
+    return adata
+
+
+def create_anndata(region, cell_type='Astrocytes'):
+    """Load or build AnnData for a region. Astrocytes: MTX + Excel. Microglia: pre-built h5ad."""
+    if cell_type == "Astrocytes":
+        return create_anndata_astrocytes(region)
+    elif cell_type == "Microglia":
+        return load_anndata_microglia(region)
+    raise ValueError(f"Invalid cell type: {cell_type}")
+
+def main(args=None):
+    args = args or argparse.Namespace(cell_type="Astrocytes", region=None)
+    cell_type = args.cell_type
+    n_folds = 8
+    target_dims = 16
+
+    if cell_type == "Astrocytes":
+        all_regions = ["EC", "ITG", "PFC", "V2", "V1"]
+    elif cell_type == "Microglia":
+        all_regions = ["CrossRegion", "ITG", "PFC"]
+    else:
+        raise ValueError(f"Invalid cell type: {cell_type}")
+
+    regions = [args.region] if args.region else all_regions
+
     print("="*80)
-    print("Scaling All Gene Embeddings by Cell Expression (Astrocytes Only)")
-    print("10-Fold Cross-Validation Split with Target Variables")
+    print(f"Scaling Gene Embeddings by Cell Expression ({cell_type})")
+    print(f"{n_folds}-Fold Cross-Validation Split with Target Variables")
+    print(f"Regions: {regions}")
     print("="*80)
 
-    # Target dimensions for PCA reduction
-    target_dims = 16
-    target_cell_type = "Astrocytes"
-    n_folds = 8
-    
-    # Find all gene embedding files
     embeddings_dir = os.path.join("GREmLN", "embeddings")
-    
-    # Filter to only Astrocyte files
-    if target_cell_type == "Astrocytes":
-        regions = ["EC", "ITG", "PFC", "V2", "V1"]
-    elif target_cell_type == "Microglia":
-        regions = ["CrossRegion", "EC", "ITG", "PFC", "V2", "V1"]
-    else:
-        raise ValueError(f"Invalid cell type: {target_cell_type}")
-    
+
     for region in regions:
-        print(f"Processing {region}")
-        if target_cell_type == "Astrocytes":
+        print(f"Processing {region} ({cell_type})")
+        if cell_type == "Astrocytes":
             emb_path = os.path.join(embeddings_dir, f"{region}_gene_embeddings.tsv")
-        elif target_cell_type == "Microglia":
+        else:
             emb_path = os.path.join(embeddings_dir, f"{region}_Microglia_gene_embeddings.tsv")
 
-        # load the region data
-        adata = create_anndata(region)
+        adata = create_anndata(region, cell_type)
         # Load gene embeddings
         embeddings_dict = load_gene_embeddings(emb_path, gene_list=adata.var_names)
 
@@ -158,7 +187,8 @@ def main():
         print(f"Filtered adata shape: {adata.shape}")
 
          # Get expression matrix with cells as rows and genes as columns
-        expression_matrix = np.array(adata.X.toarray(), dtype=np.float16)
+        X = adata.X
+        expression_matrix = np.array(X.toarray() if hasattr(X, "toarray") else np.asarray(X), dtype=np.float16)
 
         # create embeddings matrix from embeddings_dict
         embeddings_matrix = np.array([embeddings_dict[gene] for gene in adata.var_names], dtype=np.float16)
@@ -201,7 +231,32 @@ def main():
             # ptau and thal have only one value per patient, so take the first (or unique) value
             all_ptau.append(ptau_info[patient_mask].iloc[0])
             all_thal.append(thal_info[patient_mask].iloc[0])
-        
+
+        # Microglia: drop patients with NaN or invalid Braak/CERAD so downstream code never sees them
+        if cell_type == "Microglia":
+            BRAAK_VALID = {2, 3, 5, 6}
+            CERAD_VALID = {"none", "sparse", "moderate", "frequent"}
+            def valid_microglia(ptau_val, thal_val):
+                try:
+                    if pd.isna(ptau_val) or pd.isna(thal_val):
+                        return False
+                    braak = int(round(float(ptau_val)))
+                    if braak not in BRAAK_VALID:
+                        return False
+                    cerad = str(thal_val).strip().lower()
+                    return cerad in CERAD_VALID
+                except (ValueError, TypeError):
+                    return False
+            valid_idx = [i for i in range(len(unique_patients)) if valid_microglia(all_ptau[i], all_thal[i])]
+            n_dropped = len(unique_patients) - len(valid_idx)
+            if n_dropped > 0:
+                print(f"  Microglia: dropping {n_dropped} patients with NaN or invalid Braak/CERAD (keeping {len(valid_idx)})")
+            unique_patients = np.asarray(unique_patients)[valid_idx]
+            all_patient_embeddings = [all_patient_embeddings[i] for i in valid_idx]
+            all_cell_names = [all_cell_names[i] for i in valid_idx]
+            all_ptau = [all_ptau[i] for i in valid_idx]
+            all_thal = [all_thal[i] for i in valid_idx]
+
         # Split patients into 8 folds (not cells, but patients)
         n_patients = len(unique_patients)
         kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
@@ -231,8 +286,12 @@ def main():
             n_fold_patients = len(fold_patient_indices)
             print(f"  Fold {fold_idx + 1}: {n_fold_patients} patients, {n_fold_cells} cells")
 
-        # Save folds
-        emb_output_dir = os.path.join("data", "model_data", f"{region}_data_for_model_training.pkl")
+        # Save folds (Microglia uses separate filename to avoid overwriting Astrocytes)
+        if cell_type == "Microglia":
+            out_name = f"{region}_Microglia_data_for_model_training.pkl"
+        else:
+            out_name = f"{region}_data_for_model_training.pkl"
+        emb_output_dir = os.path.join("data", "model_data", out_name)
         with open(emb_output_dir, "wb") as f:
             pickle.dump((embeddings_folds, patient_info_folds, ptau_folds, thal_folds), f, protocol=pickle.HIGHEST_PROTOCOL)
         print(f"Saved {n_folds} folds of rescaled embeddings to {emb_output_dir}")
@@ -253,4 +312,10 @@ def main():
             print("Memory info not available (psutil not installed)")
   
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Scale gene embeddings by expression and save for model training")
+    parser.add_argument("--cell_type", type=str, default="Astrocytes", choices=["Astrocytes", "Microglia"],
+                        help="Cell type (default: Astrocytes)")
+    parser.add_argument("--region", type=str, default=None,
+                        help="Process only this region (e.g., EC). If omitted, process all regions for the cell type.")
+    args = parser.parse_args()
+    main(args)

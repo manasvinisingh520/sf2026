@@ -1,5 +1,6 @@
 """Save region-specific raw gene expression data with Thal and ptau, separated by patient.
 Similar format to create_data.py but saves raw expression instead of scaled embeddings.
+Astrocytes: MTX + Excel. Microglia: pre-built h5ad (data/model_data/{region}_Microglia_AnnData_perCell.h5ad).
 """
 
 import pandas as pd
@@ -10,6 +11,7 @@ import gc
 import argparse
 from sklearn.model_selection import KFold
 from pathlib import Path
+import anndata as ad
 from utils import (
     get_region_file_paths,
     read_excel_columns,
@@ -18,6 +20,39 @@ from utils import (
     get_top_k_genes,
 )
 from config import REGION_TO_TAB, DATA_DIR
+
+
+def _find_anndata_microglia(region):
+    path = os.path.join("data", "model_data", f"{region}_Microglia_AnnData_perCell.h5ad")
+    return path if os.path.exists(path) else None
+
+
+def _load_anndata_microglia(region):
+    """Load Microglia per-cell AnnData from pre-built h5ad."""
+    path = _find_anndata_microglia(region)
+    if path is None:
+        raise FileNotFoundError(
+            f"Microglia AnnData not found: data/model_data/{region}_Microglia_AnnData_perCell.h5ad. "
+            "Create it first (e.g. save_perCell_AnnData.py -cell_type Microglia -region <region>)."
+        )
+    adata = ad.read_h5ad(path)
+    if "SampleName" not in adata.obs.columns:
+        if "Donor_ID" in adata.obs.columns:
+            adata.obs["SampleName"] = adata.obs["Donor_ID"].astype(str)
+        elif "Donor ID" in adata.obs.columns:
+            adata.obs["SampleName"] = adata.obs["Donor ID"].astype(str)
+        else:
+            raise ValueError(
+                f"Microglia AnnData must have obs 'SampleName' or 'Donor_ID'/'Donor ID'. Found: {list(adata.obs.columns)}"
+            )
+    if "Thal" not in adata.obs.columns or "Ptau.Total.Tau..A.U.." not in adata.obs.columns:
+        raise ValueError(
+            f"Microglia AnnData must have obs 'Thal' and 'Ptau.Total.Tau..A.U..'. Found: {list(adata.obs.columns)}"
+        )
+    valid = (adata.obs["Thal"] != "unk").fillna(False)
+    adata = adata[valid].copy()
+    print(f"Loaded Microglia AnnData: {adata.shape} from {path}")
+    return adata
 
 
 def load_top_genes_from_dge_union(
@@ -66,18 +101,17 @@ def load_top_genes_from_dge_union(
 
 
 def create_anndata(region, cell_type='Astrocytes'):
-    """Create AnnData object for a given region and cell type."""
+    """Create AnnData for a region. Astrocytes: MTX + Excel. Microglia: pre-built h5ad."""
+    if cell_type == "Microglia":
+        return _load_anndata_microglia(region)
+
     base_prefix = f"2025-11-16_{cell_type}_{region}"
-    
     mtx_path, row_annotation_path, col_annotation_path = get_region_file_paths(
         region,
         data_dir=DATA_DIR,
         base_prefix=base_prefix
     )
-    # Get metadata path
     metadata_path = os.path.join(DATA_DIR, f"2025-11-16_{cell_type}_metadata.xlsx")
-    
-    # Get tab index for this region
     tab_index = REGION_TO_TAB.get(region)
     
     # Load metadata
@@ -206,7 +240,34 @@ def main(args):
                 # ptau and thal have only one value per patient, so take the first (or unique) value
                 all_ptau.append(ptau_info[patient_mask].iloc[0])
                 all_thal.append(thal_info[patient_mask].iloc[0])
-            
+
+            # Microglia: drop patients with NaN or invalid Braak/CERAD (same as create_data.py)
+            if args.cell_type == "Microglia":
+                import pandas as pd
+                BRAAK_VALID = {2, 3, 5, 6}
+                CERAD_VALID = {"none", "sparse", "moderate", "frequent"}
+                def valid_microglia(ptau_val, thal_val):
+                    try:
+                        if pd.isna(ptau_val) or pd.isna(thal_val):
+                            return False
+                        braak = int(round(float(ptau_val)))
+                        if braak not in BRAAK_VALID:
+                            return False
+                        cerad = str(thal_val).strip().lower()
+                        return cerad in CERAD_VALID
+                    except (ValueError, TypeError):
+                        return False
+                valid_idx = [i for i in range(len(unique_patients)) if valid_microglia(all_ptau[i], all_thal[i])]
+                n_dropped = len(unique_patients) - len(valid_idx)
+                if n_dropped > 0:
+                    print(f"  Microglia: dropping {n_dropped} patients with NaN or invalid Braak/CERAD (keeping {len(valid_idx)})")
+                unique_patients = np.asarray(unique_patients)[valid_idx]
+                all_patient_expressions = [all_patient_expressions[i] for i in valid_idx]
+                all_ptau = [all_ptau[i] for i in valid_idx]
+                all_thal = [all_thal[i] for i in valid_idx]
+                filtered_names = unique_patients.tolist() if hasattr(unique_patients, 'tolist') else list(unique_patients)
+                all_patient_info = {n: all_patient_info[n] for n in filtered_names}
+
             # Split patients into folds
             n_patients = len(unique_patients)
             kf = KFold(n_splits=args.n_folds, shuffle=True, random_state=42)
@@ -239,8 +300,8 @@ def main(args):
             # Save folds
             output_dir = os.path.join("data", "model_data")
             os.makedirs(output_dir, exist_ok=True)
-            
-            output_path = os.path.join(output_dir, f"{region}_raw_expression_data.pkl")
+            out_name = f"{region}_Microglia_raw_expression_data.pkl" if args.cell_type == "Microglia" else f"{region}_raw_expression_data.pkl"
+            output_path = os.path.join(output_dir, out_name)
             with open(output_path, "wb") as f:
                 pickle.dump((expression_folds, patient_info_folds, ptau_folds, thal_folds), f, 
                             protocol=pickle.HIGHEST_PROTOCOL)

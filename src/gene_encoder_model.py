@@ -83,3 +83,46 @@ class GeneEncoderModel(nn.Module):
         thal_logits = self.thal_head(h)
 
         return ptau, thal_logits, w
+
+
+class GeneEncoderModelMicroglia(nn.Module):
+    """
+    Same softmax-weighted pooling as GeneEncoderModel.
+    Two classification heads: CERAD and Braak (no regression).
+    forward returns (cerad_logits, braak_logits, w).
+    """
+
+    def __init__(self, n_dims, n_cerad_classes, n_braak_classes, dropout=0.2, n_genes=None):
+        super().__init__()
+        self.n_dims = n_dims
+        self.n_cerad_classes = n_cerad_classes
+        self.n_braak_classes = n_braak_classes
+
+        hidden = max(1, n_dims // 2)
+        self.weight_mlp = nn.Sequential(
+            nn.Linear(n_dims, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1),
+        )
+
+        trunk_hidden = 16
+        self.shared = nn.Sequential(
+            nn.Linear(n_dims, trunk_hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+
+        self.cerad_head = nn.Linear(trunk_hidden, n_cerad_classes)
+        self.braak_head = nn.Linear(trunk_hidden, n_braak_classes)
+
+    def forward(self, x):
+        """
+        x: (B, G, D) - batch, n_genes, n_dims
+        """
+        logits = self.weight_mlp(x).squeeze(-1)  # (B, G)
+        w = torch.softmax(logits, dim=1)  # (B, G)
+        patient_vec = (w.unsqueeze(-1) * x).sum(dim=1)  # (B, D)
+        h = self.shared(patient_vec)
+        cerad_logits = self.cerad_head(h)
+        braak_logits = self.braak_head(h)
+        return cerad_logits, braak_logits, w

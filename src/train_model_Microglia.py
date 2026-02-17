@@ -1,0 +1,323 @@
+"""Train Microglia model (CERAD + Braak classification) with k-fold cross-validation.
+Uses BaselineRankingModelMicroglia or GeneEncoderModelMicroglia. Returns (avg_f1, 0, 0, fold_results) for compatibility with runners."""
+
+import argparse
+import pickle
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.tensorboard import SummaryWriter
+from sklearn.metrics import f1_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+import os
+
+from train_model import apply_pooling
+from baseline_model_Microglia import (
+    BaselineRankingModelMicroglia,
+    CERAD_CLASS_ORDER,
+    BRAAK_TO_IDX,
+)
+from gene_encoder_model import GeneEncoderModelMicroglia, gene_entropy_loss
+
+
+class EmbeddingDatasetMicroglia(Dataset):
+    """Dataset for embeddings with CERAD and Braak (both classification indices)."""
+    def __init__(self, embeddings, cerad, braak):
+        self.embeddings = torch.FloatTensor(embeddings)
+        self.cerad = torch.LongTensor(cerad)
+        self.braak = torch.LongTensor(braak)
+
+    def __len__(self):
+        return len(self.embeddings)
+
+    def __getitem__(self, idx):
+        return self.embeddings[idx], self.cerad[idx], self.braak[idx]
+
+
+def _unpack_model_out(out):
+    """Model returns (cerad, braak) or (cerad, braak, w)."""
+    cerad_pred, braak_pred = out[0], out[1]
+    w = out[2] if len(out) == 3 else None
+    return cerad_pred, braak_pred, w
+
+
+def train_epoch_microglia(model, dataloader, criterion_cerad, criterion_braak, optimizer, device, lambda_entropy=0.0):
+    model.train()
+    total_loss = 0
+    for embeddings, cerad, braak in dataloader:
+        embeddings = embeddings.to(device)
+        cerad = cerad.to(device)
+        braak = braak.to(device)
+        optimizer.zero_grad()
+        out = model(embeddings)
+        cerad_pred, braak_pred, w = _unpack_model_out(out)
+        loss = criterion_cerad(cerad_pred, cerad) + criterion_braak(braak_pred, braak)
+        if lambda_entropy > 0 and w is not None:
+            loss = loss + lambda_entropy * gene_entropy_loss(w)
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+    return total_loss / len(dataloader)
+
+
+def evaluate_microglia(model, dataloader, criterion_cerad, criterion_braak, device):
+    model.eval()
+    total_loss = 0
+    cerad_preds, cerad_targets = [], []
+    braak_preds, braak_targets = [], []
+    with torch.no_grad():
+        for embeddings, cerad, braak in dataloader:
+            embeddings = embeddings.to(device)
+            cerad = cerad.to(device)
+            braak = braak.to(device)
+            out = model(embeddings)
+            cerad_pred, braak_pred, _ = _unpack_model_out(out)
+            loss = criterion_cerad(cerad_pred, cerad) + criterion_braak(braak_pred, braak)
+            total_loss += loss.item()
+            cerad_preds.extend(torch.argmax(cerad_pred, dim=1).cpu().numpy())
+            cerad_targets.extend(cerad.cpu().numpy())
+            braak_preds.extend(torch.argmax(braak_pred, dim=1).cpu().numpy())
+            braak_targets.extend(braak.cpu().numpy())
+    f1_cerad = f1_score(cerad_targets, cerad_preds, average="weighted")
+    f1_braak = f1_score(braak_targets, braak_preds, average="weighted")
+    return total_loss / len(dataloader), f1_cerad, f1_braak
+
+
+def main(args):
+    data_path = os.path.join("data", "model_data", f"{args.region}_Microglia_data_for_model_training.pkl")
+    print(f"Loading data from {data_path}")
+
+    with open(data_path, "rb") as f:
+        embeddings_folds, patient_info_folds, ptau_folds, thal_folds = pickle.load(f)
+
+    print(f"Loaded {len(embeddings_folds)} folds")
+
+    device = torch.device(args.device)
+    print(f"Using device: {device}")
+
+    cerad_to_idx = {s: i for i, s in enumerate(CERAD_CLASS_ORDER)}
+    n_cerad_classes = len(CERAD_CLASS_ORDER)
+    n_braak_classes = len(BRAAK_TO_IDX)
+    criterion_cerad = nn.CrossEntropyLoss()
+    criterion_braak = nn.CrossEntropyLoss()
+
+    n_folds = len(embeddings_folds)
+    all_fold_patient_data = []
+
+    print(f"\n{'='*60}")
+    print("Pipeline: cells → patient embedding (StandardScaler+PCA in CV)")
+    print(f"{'='*60}")
+
+    for fold_idx in range(n_folds):
+        print(f"\nPreparing fold {fold_idx + 1}/{n_folds}...")
+        fold_embeddings = embeddings_folds[fold_idx]
+        fold_ptau = ptau_folds[fold_idx]
+        fold_thal = thal_folds[fold_idx]
+        fold_patient_info = patient_info_folds[fold_idx]
+
+        use_gene_encoder = getattr(args, "gene_encoder", False)
+        pooling = None if use_gene_encoder else getattr(args, "pooling", "mean")
+        if pooling is None:
+            pooled_embeddings = fold_embeddings
+        else:
+            pooled_embeddings = apply_pooling(fold_embeddings, method=pooling)
+        print(f"  Pooled embeddings shape: {pooled_embeddings.shape}")
+
+        patient_embeddings = []
+        patient_ptau = []
+        patient_thal = []
+        cell_idx = 0
+        for patient_idx, (patient_name, cell_names) in enumerate(fold_patient_info.items()):
+            n_cells_patient = len(cell_names)
+            patient_cell_embeddings = pooled_embeddings[cell_idx : cell_idx + n_cells_patient]
+            patient_emb = np.mean(patient_cell_embeddings, axis=0)
+            patient_embeddings.append(patient_emb)
+            patient_ptau.append(fold_ptau[patient_idx])
+            patient_thal.append(fold_thal[patient_idx])
+            cell_idx += n_cells_patient
+
+        patient_embeddings = np.array(patient_embeddings)
+        patient_ptau = np.array(patient_ptau)
+        patient_thal = np.array(patient_thal)
+        patient_cerad = np.array([cerad_to_idx.get(str(t).strip().lower(), 0) for t in patient_thal])
+        # Braak: ptau values 2,3,5,6 only (invalid/NaN patients already filtered in create_data)
+        patient_braak = np.array([BRAAK_TO_IDX.get(int(round(p)), 0) for p in patient_ptau])
+
+        all_fold_patient_data.append({
+            "embeddings": patient_embeddings,
+            "cerad": patient_cerad,
+            "braak": patient_braak,
+        })
+        print(f"  Patient embeddings shape: {patient_embeddings.shape}, n_patients: {len(patient_ptau)}")
+
+    fold_results = []
+
+    for test_fold_idx in range(n_folds):
+        print(f"\n{'='*60}")
+        print(f"Test Fold {test_fold_idx + 1}/{n_folds}")
+        print(f"{'='*60}")
+
+        train_fold_indices = [i for i in range(n_folds) if i != test_fold_idx]
+        train_embeddings = np.concatenate([all_fold_patient_data[i]["embeddings"] for i in train_fold_indices], axis=0)
+        train_cerad = np.concatenate([all_fold_patient_data[i]["cerad"] for i in train_fold_indices], axis=0)
+        train_braak = np.concatenate([all_fold_patient_data[i]["braak"] for i in train_fold_indices], axis=0)
+        test_embeddings = all_fold_patient_data[test_fold_idx]["embeddings"]
+        test_cerad = all_fold_patient_data[test_fold_idx]["cerad"]
+        test_braak = all_fold_patient_data[test_fold_idx]["braak"]
+
+        n_train, n_test = train_embeddings.shape[0], test_embeddings.shape[0]
+
+        if len(train_embeddings.shape) == 3:
+            n_genes, n_dims = train_embeddings.shape[1], train_embeddings.shape[2]
+            train_2d = train_embeddings.reshape(n_train, -1)
+            test_2d = test_embeddings.reshape(n_test, -1)
+            scaler = StandardScaler()
+            train_scaled = scaler.fit_transform(train_2d)
+            test_scaled = scaler.transform(test_2d)
+            train_scaled = train_scaled.reshape(n_train, n_genes, n_dims)
+            test_scaled = test_scaled.reshape(n_test, n_genes, n_dims)
+            if getattr(args, "pca_components", None) is not None:
+                train_for_pca = train_scaled.reshape(-1, n_dims)
+                test_for_pca = test_scaled.reshape(-1, n_dims)
+                pca = PCA(n_components=args.pca_components)
+                train_pca = pca.fit_transform(train_for_pca)
+                test_pca = pca.transform(test_for_pca)
+                train_embeddings = train_pca.reshape(n_train, n_genes, args.pca_components)
+                test_embeddings = test_pca.reshape(n_test, n_genes, args.pca_components)
+            else:
+                train_embeddings = train_scaled
+                test_embeddings = test_scaled
+        else:
+            scaler = StandardScaler()
+            train_embeddings = scaler.fit_transform(train_embeddings)
+            test_embeddings = scaler.transform(test_embeddings)
+            if getattr(args, "pca_components", None) is not None:
+                pca = PCA(n_components=args.pca_components)
+                train_embeddings = pca.fit_transform(train_embeddings)
+                test_embeddings = pca.transform(test_embeddings)
+
+        train_dataset = EmbeddingDatasetMicroglia(train_embeddings, train_cerad, train_braak)
+        test_dataset = EmbeddingDatasetMicroglia(test_embeddings, test_cerad, test_braak)
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+        test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
+
+        use_gene_encoder = getattr(args, "gene_encoder", False)
+        lambda_entropy = getattr(args, "lambda_entropy", 0.0) if use_gene_encoder else 0.0
+
+        if use_gene_encoder:
+            if len(train_embeddings.shape) != 3:
+                raise ValueError("Gene encoder requires 3D embeddings (n_samples, n_genes, n_dims).")
+            n_dims = train_embeddings.shape[2]
+            model = GeneEncoderModelMicroglia(
+                n_dims=n_dims,
+                n_cerad_classes=n_cerad_classes,
+                n_braak_classes=n_braak_classes,
+                dropout=args.dropout,
+            ).to(device)
+        else:
+            if len(train_embeddings.shape) == 3:
+                input_shape = (train_embeddings.shape[1], train_embeddings.shape[2])
+                input_dim = None
+            else:
+                input_shape = None
+                input_dim = train_embeddings.shape[1]
+            model = BaselineRankingModelMicroglia(
+                input_dim=input_dim,
+                input_shape=input_shape,
+                n_cerad_classes=n_cerad_classes,
+                n_braak_classes=n_braak_classes,
+                use_attention=getattr(args, "attention", False),
+                num_heads=getattr(args, "attention_heads", 1),
+                dropout=args.dropout,
+            ).to(device)
+
+        optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
+        ge_suffix = "_ge" if use_gene_encoder else ""
+        attention_suffix = "_attn" if (getattr(args, "attention", False) and not use_gene_encoder) else ""
+        exp_id_str = f"_{args.exp_id}" if getattr(args, "exp_id", None) else ""
+        log_base = getattr(args, "log_base", "runs")
+        log_dir = os.path.join(
+            log_base,
+            f"{args.region}_Microglia{ge_suffix}{attention_suffix}_drop{args.dropout}_wd{args.weight_decay}{exp_id_str}_testfold{test_fold_idx+1}",
+        )
+        if os.path.exists(log_dir):
+            try:
+                import shutil
+                shutil.rmtree(log_dir)
+            except (PermissionError, OSError):
+                pass
+        writer = SummaryWriter(log_dir)
+
+        best_test_f1 = float("-inf")
+        best_epoch = 0
+        best_test_f1_cerad = best_test_f1_braak = None
+
+        for epoch in range(args.epochs):
+            train_loss = train_epoch_microglia(
+                model, train_loader, criterion_cerad, criterion_braak, optimizer, device,
+                lambda_entropy=lambda_entropy,
+            )
+            test_loss, test_f1_cerad, test_f1_braak = evaluate_microglia(
+                model, test_loader, criterion_cerad, criterion_braak, device
+            )
+            test_f1 = (test_f1_cerad + test_f1_braak) / 2.0
+            writer.add_scalar("Loss/Train", train_loss, epoch)
+            writer.add_scalar("Loss/Test", test_loss, epoch)
+            writer.add_scalar("Metrics/Test_F1_cerad", test_f1_cerad, epoch)
+            writer.add_scalar("Metrics/Test_F1_braak", test_f1_braak, epoch)
+            writer.add_scalar("Metrics/Test_F1", test_f1, epoch)
+
+            if test_f1 > best_test_f1:
+                best_test_f1 = test_f1
+                best_epoch = epoch
+                best_test_f1_cerad = test_f1_cerad
+                best_test_f1_braak = test_f1_braak
+
+            if (epoch + 1) % 10 == 0:
+                print(f"Epoch {epoch+1}/{args.epochs} - Train Loss: {train_loss:.4f}, Test F1: {test_f1:.4f} (CERAD: {test_f1_cerad:.4f}, Braak: {test_f1_braak:.4f})")
+
+        writer.close()
+        print(f"\nTest Fold {test_fold_idx + 1} Best F1: {best_test_f1:.4f} at epoch {best_epoch + 1} (CERAD: {best_test_f1_cerad:.4f}, Braak: {best_test_f1_braak:.4f})")
+        fold_results.append({
+            "test_fold": test_fold_idx + 1,
+            "best_f1": best_test_f1,
+            "best_epoch": best_epoch + 1,
+            "best_test_mse": 0.0,
+            "best_test_mae": 0.0,
+        })
+
+    print(f"\n{'='*60}")
+    print("Leave-One-Fold-Out Cross-Validation Summary")
+    print(f"{'='*60}")
+    for result in fold_results:
+        print(f"\033[92mTest Fold {result['test_fold']}: F1={result['best_f1']:.4f}\033[0m")
+
+    avg_f1 = np.mean([r["best_f1"] for r in fold_results])
+    print(f"\nAverage F1: {avg_f1:.4f}")
+
+    return avg_f1, 0.0, 0.0, fold_results
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train Microglia model (CERAD + Braak classification)")
+    parser.add_argument("--region", type=str, required=True)
+    parser.add_argument("--pooling", type=str, default="mean", choices=["mean", "max"], help="Set to None when --gene_encoder (runner does this)")
+    parser.add_argument("--gene_encoder", action="store_true", help="Use GeneEncoderModelMicroglia (softmax pooling, CERAD+Braak)")
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--lr", type=float, default=0.001)
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--attention", action="store_true")
+    parser.add_argument("--attention_heads", type=int, default=1)
+    parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--weight_decay", type=float, default=0.1)
+    parser.add_argument("--pca_components", type=int, default=None)
+    parser.add_argument("--lambda_entropy", type=float, default=1e-3)
+    parser.add_argument("--log_base", type=str, default="runs")
+    parser.add_argument("--exp_id", type=str, default=None)
+    args = parser.parse_args()
+    main(args)

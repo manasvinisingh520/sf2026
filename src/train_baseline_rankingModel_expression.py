@@ -1,7 +1,7 @@
-"""Train baseline ranking model on patient-level raw expression folds.
+"""Train baseline ranking model on patient-level raw expression folds (Astrocytes only).
 
 This script reuses the model + training utilities from `src/train_model.py` and `src/baseline_model.py`,
-but loads raw expression data produced by `src/create_raw_expression_data.py`.
+but loads raw expression data produced by `src/create_raw_expression_data.py` with --cell_type Astrocytes.
 
 Expected pickle format (per region):
     (expression_folds, patient_info_folds, ptau_folds, thal_folds)
@@ -21,6 +21,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 
@@ -119,6 +120,13 @@ def main(args):
         test_embeddings = scaler.transform(test_embeddings)
         print("Applied StandardScaler normalization (fit on train, applied to train and test)")
 
+        pca_components = getattr(args, "pca_components", None)
+        if pca_components is not None:
+            pca = PCA(n_components=pca_components)
+            train_embeddings = pca.fit_transform(train_embeddings)
+            test_embeddings = pca.transform(test_embeddings)
+            print(f"Applied PCA: reduced to {pca_components} components (fit on train, transform train and test)")
+
         print(f"Train: {len(train_embeddings)} patients, Test: {len(test_embeddings)} patients")
 
         train_dataset = EmbeddingDataset(train_embeddings, train_ptau, train_thal)
@@ -138,12 +146,17 @@ def main(args):
 
         optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
+        log_base = getattr(args, "log_base", "runs")
         attention_suffix = "_attn" if args.attention else ""
         dropout_str = f"_drop{args.dropout}"
         wd_str = f"_wd{args.weight_decay}"
+        pca_str = f"_pca{pca_components}" if pca_components is not None else "_pcaNone"
+        exp_id_str = f"_{args.exp_id}" if getattr(args, "exp_id", None) else ""
+        # When exp_id is set (e.g. attnTrue_huber_pca2_baseline), use it instead of pca_str to match embedding-style path
+        suffix = f"{exp_id_str}" if exp_id_str else pca_str
         log_dir = os.path.join(
-            "runs",
-            f"{args.region}_{args.cell_type}_expr_{args.loss_ptau}{attention_suffix}{dropout_str}{wd_str}_testfold{test_fold_idx+1}",
+            log_base,
+            f"{args.region}_Astrocytes_expr_{args.loss_ptau}{attention_suffix}{dropout_str}{wd_str}{suffix}_testfold{test_fold_idx+1}",
         )
         writer = SummaryWriter(log_dir)
 
@@ -212,17 +225,12 @@ def main(args):
     print(f"Average MSE: {avg_mse:.4f}")
     print(f"Average MAE: {avg_mae:.4f}")
 
+    return avg_f1, avg_mse, avg_mae, fold_results
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train baseline ranking model on raw expression folds")
+    parser = argparse.ArgumentParser(description="Train baseline ranking model on raw expression folds (Astrocytes only)")
     parser.add_argument("--region", type=str, required=True, help="Region name (e.g., EC, ITG, PFC)")
-    parser.add_argument(
-        "--cell_type",
-        type=str,
-        default='Astrocytes',
-        choices=["Astrocytes", "Microglia"],
-        help="Cell type (Astrocytes or Microglia, default: Astrocytes)",
-    )
     parser.add_argument(
         "--loss_ptau",
         type=str,
@@ -243,6 +251,8 @@ if __name__ == "__main__":
     parser.add_argument("--weight_decay", type=float, default=1e-2, help="Weight decay for Adam optimizer (default: 1e-2)")
     parser.add_argument("--attention", action="store_true", help="Use self-attention layer (ignored for expression data: 1D input)")
     parser.add_argument("--attention_heads", type=int, default=1, help="Number of attention heads when --attention is set (default: 1)")
+    parser.add_argument("--pca_components", type=int, default=None, help="PCA components (None = no PCA). Reduces n_genes to this many dimensions.")
+    parser.add_argument("--log_base", type=str, default="runs", help="Base directory for TensorBoard logs (default: runs)")
 
     main(parser.parse_args())
 
