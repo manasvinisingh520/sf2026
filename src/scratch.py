@@ -6,10 +6,10 @@ import pandas as pd
 import anndata as ad
 from config import REGION_TO_TAB, DATA_DIR
 from utils import read_excel_columns
-from read_tensorboard_files import check_overfitting
+from read_tensorboard_files import count_overfitts
 
 
-def extract_best_per_attn_loss_dim(csv_path: str, embedding: bool = None):
+def extract_best_per_attn_loss_dim(csv_path: str, embedding: bool = None, microglia: bool = False):
     """Read experiments CSV and return the best model (by F1) per group.
     If embedding=True or CSV has 'gene_encoder', group by (gene_encoder, attention, loss_ptau, pca_components).
     Otherwise (expression) group by (attention, loss_ptau, pca_components).
@@ -20,9 +20,15 @@ def extract_best_per_attn_loss_dim(csv_path: str, embedding: bool = None):
     df = df.dropna(subset=["avg_f1"])
     use_embedding = embedding if embedding is not None else ("gene_encoder" in df.columns)
     if use_embedding:
-        group_cols = ["gene_encoder", "attention", "loss_ptau", "pca_components"]
+        if not args.microglia:
+            group_cols = ["gene_encoder", "attention", "loss_ptau", "pca_components"]
+        else:
+            group_cols = ["gene_encoder", "attention", "pca_components"]
     else:
-        group_cols = ["attention", "loss_ptau", "pca_components"]
+        if not args.microglia:
+            group_cols = ["attention", "loss_ptau", "pca_components"]
+        else:
+            group_cols = ["attention", "pca_components"]
     for c in group_cols:
         if c not in df.columns:
             raise ValueError(f"CSV must have column '{c}'. Found: {list(df.columns)}")
@@ -38,9 +44,9 @@ def extract_best_per_attn_loss_dim(csv_path: str, embedding: bool = None):
     overfits = []
     for i in idx:
         row = df.loc[i]
-        logdir = tensorboard_dir_for_row(row)
+        logdir = tensorboard_dir_for_row(row, microglia=microglia)
         try:
-            overfit = check_overfitting(logdir)  # single run path already includes _testfoldN
+            overfit = count_overfitts(logdir)  # single run path already includes _testfoldN
         except Exception as e:
             print(f"Warning: Could not check overfitting for {logdir}: {e}")
             overfit = None
@@ -50,26 +56,37 @@ def extract_best_per_attn_loss_dim(csv_path: str, embedding: bool = None):
     return best
 
 
-def tensorboard_dir_for_row(row, log_base=None):
+def tensorboard_dir_for_row(row, log_base=None, microglia=False):
     """Build TensorBoard directory path for a best-model row.
     Example: I:\\sf2026\\Astrocytes_V2_run2\\V2_None_mse_geneenc_drop0.5_wd1.0_geTrue_attnFalse_mse_pca16_all_strong_testfold8
     """
     region = row["region"]
     if log_base is None:
-        log_base = os.path.join("I:\\", "sf2026", f"Astrocytes_{region}_run2")
-    pooling = row.get("pooling", "mean")
-    loss_ptau = row["loss_ptau"]
-    gene_encoder = row.get("gene_encoder", False)
-    attention = row.get("attention", False)
-    dropout = row["dropout"]
-    wd = row["weight_decay"]
-    exp_id = row.get("exp_id", row.get("run", ""))
-    test_fold_idx = row.get("test_fold_idx")
-    mname = "_geneenc" if gene_encoder else ("_attn" if attention else "")
-    name = f"{region}_{pooling}_{loss_ptau}{mname}_drop{dropout}_wd{wd}_{exp_id}"
-    if test_fold_idx is not None:
-        name += f"_testfold{test_fold_idx}"
-    return os.path.join(log_base, name)
+        #log_base = os.path.join("I:\\", "sf2026", f"Astrocytes_{region}_run2")
+        log_base = os.path.join("I:\\", "sf2026", f"Microglia_{region}")
+    if region != "EC":
+        pooling = row.get("pooling", "None")
+        if not microglia:
+            loss_ptau = row["loss_ptau"]
+        else:
+            loss_ptau = ""
+        gene_encoder = row.get("gene_encoder")
+        pooling = "mean" if not gene_encoder else pooling
+        attention = row.get("attention")
+        dropout = row["dropout"]
+        wd = row["weight_decay"]
+        exp_id = row.get("exp_id", row.get("run", ""))
+        test_fold_idx = row.get("test_fold_idx")
+        if not microglia:
+            mname = "_geneenc" if gene_encoder else ("_attn" if attention else "")
+            name = f"{region}_{pooling}_{loss_ptau}{mname}_drop{dropout}_wd{wd}_{exp_id}"
+        else:
+            mname = "_ge" if gene_encoder else ("_attn" if attention else "")
+            name = f"{region}_Microglia{mname}_drop{dropout}_wd{wd}_{exp_id}"
+        return os.path.join(log_base, name)
+    else:
+        exp_id = row.get("exp_id", row.get("run", ""))
+        return os.path.join(log_base, exp_id)
 
 
 def print_patient_counts():
@@ -118,24 +135,33 @@ if __name__ == "__main__":
     parser.add_argument("--csv", type=str, default=None, help="Experiments CSV; if set, extract best per combo: Ex. ")
     parser.add_argument("--embedding", action="store_true", help="CSV is from run_overfitting_experiments (embedding); group by ge, attn, loss, pca")
     parser.add_argument("--patients", action="store_true", help="Print patient counts per region (default if no --csv)")
+    parser.add_argument("--microglia", action="store_true", help="Extract best model per (attention, pca_components) for Microglia")
     args = parser.parse_args()
 
     if args.csv:
         if not os.path.isfile(args.csv):
             print(f"File not found: {args.csv}")
             exit(1)
-        best = extract_best_per_attn_loss_dim(args.csv, embedding=args.embedding)
+        best = extract_best_per_attn_loss_dim(args.csv, embedding=args.embedding, microglia=args.microglia)
         if args.embedding or "gene_encoder" in best.columns:
             print("Best model per (gene_encoder, attention, loss_ptau, pca_components):")
             print("=" * 80)
             for _, row in best.iterrows():
-                print(f"  ge={row['gene_encoder']}, attn={row['attention']}, loss={row['loss_ptau']}, pca={row['pca_components']}  ->  "
-                      f"run={row['run']}  F1={row['avg_f1']:.4f}, MSE={row['avg_mse']:.4f}, MAE={row['avg_mae']:.4f}, overfits={row['overfit']}")
+                if not args.microglia:
+                    print(f"  ge={row['gene_encoder']}, attn={row['attention']}, loss={row['loss_ptau']}, pca={row['pca_components']}  ->  "
+                          f"run={row['run']}  F1={row['avg_f1']:.4f}, MSE={row['avg_mse']:.4f}, MAE={row['avg_mae']:.4f}, overfits={row['overfit']}")
+                elif args.microglia:
+                    print(f"  ge={row['gene_encoder']}, attn={row['attention']}, pca={row['pca_components']}  ->  "
+                          f"run={row['run']}  F1={row['avg_f1']:.4f}, MSE={row['avg_mse']:.4f}, MAE={row['avg_mae']:.4f}, overfits={row['overfit']}")
         else:
             print("Best model per (attention, loss_ptau, pca_components):")
             print("=" * 80)
             for _, row in best.iterrows():
-                print(f"  attn={row['attention']}, loss={row['loss_ptau']}, pca={row['pca_components']}  ->  "
+                if not args.microglia:
+                    print(f"  attn={row['attention']}, loss={row['loss_ptau']}, pca={row['pca_components']}  ->  "
+                          f"run={row['run']}  F1={row['avg_f1']:.4f}, MSE={row['avg_mse']:.4f}, MAE={row['avg_mae']:.4f}, overfits={row['overfit']}")
+                else:
+                    print(f"  attn={row['attention']}, pca={row['pca_components']}  ->  "
                       f"run={row['run']}  F1={row['avg_f1']:.4f}, MSE={row['avg_mse']:.4f}, MAE={row['avg_mae']:.4f}, overfits={row['overfit']}")
         print("=" * 80)
     else:

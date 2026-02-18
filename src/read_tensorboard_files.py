@@ -14,8 +14,6 @@ def read_tensorboard_events(logdir):
 def check_overfitting(logdir, tag="Loss/Test", margin=0.01, min_vals=20):
     """Return 1 if overfitting flagged, 0 otherwise. Needs >= min_vals Loss/Test values."""
     loss_values = []
-    print(f"Reading loss values from {logdir}")
-    exit()
     for step, t, value in read_tensorboard_events(logdir):
         if t == tag:
             loss_values.append(value)
