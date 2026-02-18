@@ -72,9 +72,14 @@ def train_epoch(model, dataloader, criterion_ptau, criterion_thal, optimizer, de
         ptau_pred, thal_pred = out[0], out[1]
         w = out[2] if len(out) == 3 else None
 
-        loss_ptau = criterion_ptau(ptau_pred, ptau)
         loss_thal = criterion_thal(thal_pred, thal)
-        loss = loss_ptau + loss_thal
+        loss = loss_thal
+        if criterion_ptau is not None:
+            loss_ptau = criterion_ptau(ptau_pred, ptau)
+            loss = loss + loss_ptau
+            ptau_losses.append(loss_ptau.item())
+        else:
+            ptau_losses.append(0.0)
         if lambda_entropy > 0 and w is not None:
             loss = loss + lambda_entropy * gene_entropy_loss(w)
 
@@ -82,7 +87,6 @@ def train_epoch(model, dataloader, criterion_ptau, criterion_thal, optimizer, de
         optimizer.step()
 
         total_loss += loss.item()
-        ptau_losses.append(loss_ptau.item())
         thal_losses.append(loss_thal.item())
     return total_loss / len(dataloader), np.mean(ptau_losses), np.mean(thal_losses)
 
@@ -106,9 +110,11 @@ def evaluate(model, dataloader, criterion_ptau, criterion_thal, device, idx_to_t
             ptau_pred, thal_pred = out[0], out[1]
             thal_class_preds = torch.argmax(thal_pred, dim=1)
 
-            loss_ptau = criterion_ptau(ptau_pred, ptau)
             loss_thal = criterion_thal(thal_pred, thal)
-            loss = loss_ptau + loss_thal
+            loss = loss_thal
+            if criterion_ptau is not None:
+                loss_ptau = criterion_ptau(ptau_pred, ptau)
+                loss = loss + loss_ptau
             total_loss += loss.item()
 
             ptau_preds.extend(ptau_pred.cpu().numpy())
@@ -143,7 +149,9 @@ def main(args):
     device = torch.device(args.device)
     print(f"Using device: {device}")
 
-    if args.gene_encoder:
+    if args.loss_ptau is None or (isinstance(args.loss_ptau, str) and args.loss_ptau.lower() == 'none'):
+        criterion_ptau = None
+    elif args.gene_encoder:
         criterion_ptau = nn.HuberLoss()
     elif args.loss_ptau == 'mse':
         criterion_ptau = nn.MSELoss()
@@ -406,8 +414,8 @@ if __name__ == "__main__":
     parser.add_argument('--pooling', type=str, choices=['mean', 'max'], default=None,
                        help='Pooling method: mean or max (default: None)')
     parser.add_argument('--loss_ptau', type=str, default='mse',
-                       choices=['mse', 'mae', 'huber'],
-                       help='Loss function for ptau prediction')
+                       choices=['mse', 'mae', 'huber', 'none'],
+                       help='Loss function for ptau prediction (none to omit ptau loss)')
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')

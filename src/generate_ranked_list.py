@@ -37,7 +37,7 @@ EXPERIMENTS = {
     "lower_lr": {"dropout": 0.2, "weight_decay": 0.1, "lr": 5e-4, "lambda_entropy": 1e-3},
     "lowest_lr": {"dropout": 0.2, "weight_decay": 0.1, "lr": 1e-4, "lambda_entropy": 1e-3},
     "higher_lambda_entropy": {"dropout": 0.2, "weight_decay": 0.1, "lr": 0.001, "lambda_entropy": 1e-2},
-    "highest_lambda_entropy": {"dropout": 0.2, "weight_decay": 0.1, "lr": 0.001, "lambda_entropy": 1e-1},
+    "highest_lambda_entropy": {"dropout": 0.2, "weight_decay": 0.1, "lr": 0.01, "lambda_entropy": 1e-1},
     "dropout_wd": {"dropout": 0.4, "weight_decay": 0.5, "lr": 0.001, "lambda_entropy": 1e-3},
     "dropout_lr": {"dropout": 0.4, "weight_decay": 0.1, "lr": 5e-4, "lambda_entropy": 1e-3},
     "wd_lr": {"dropout": 0.2, "weight_decay": 0.5, "lr": 5e-4, "lambda_entropy": 1e-3},
@@ -94,7 +94,8 @@ def parse_args():
     parser.add_argument("--pooling", type=str, default="mean", choices=["mean", "max"],
                         help="Pooling for embedding when not gene_encoder (default: mean)")
     parser.add_argument("--attention", action="store_true")
-    parser.add_argument("--loss_ptau", type=str, default="huber", choices=["mse", "mae", "huber"])
+    parser.add_argument("--loss_ptau", type=str, default="huber", choices=["mse", "mae", "huber", "none"],
+                        help="Loss for ptau (none to omit ptau loss)")
     parser.add_argument("--pca_components", type=int, default=None)
     parser.add_argument("--n_folds", type=int, default=8, help="Number of CV folds")
     parser.add_argument("--epochs", type=int, default=200)
@@ -278,7 +279,7 @@ def run_permutation_importance_expression(args):
                 dropout=exp_cfg["dropout"],
             ).to(device)
             optimizer = torch.optim.Adam(model.parameters(), lr=exp_cfg["lr"], weight_decay=exp_cfg["weight_decay"])
-            criterion_ptau = {"mse": nn.MSELoss(), "mae": nn.L1Loss(), "huber": nn.HuberLoss()}[args.loss_ptau]
+            criterion_ptau = None if args.loss_ptau == "none" else {"mse": nn.MSELoss(), "mae": nn.L1Loss(), "huber": nn.HuberLoss()}[args.loss_ptau]
             criterion_thal = nn.CrossEntropyLoss()
             train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
             test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
@@ -443,7 +444,7 @@ def run_permutation_importance_embedding(args):
         if args.cell_type == "Astrocytes":
             train_ds = EmbeddingDataset(train_input, train_ptau, train_thal)
             test_ds = EmbeddingDataset(test_input, test_ptau, test_thal)
-            criterion_ptau = {"mse": nn.MSELoss(), "mae": nn.L1Loss(), "huber": nn.HuberLoss()}[args.loss_ptau]
+            criterion_ptau = None if args.loss_ptau == "none" else {"mse": nn.MSELoss(), "mae": nn.L1Loss(), "huber": nn.HuberLoss()}[args.loss_ptau]
             criterion_thal = nn.CrossEntropyLoss()
             if args.gene_encoder:
                 model = GeneEncoderModel(n_dims=n_dims, n_thal_classes=len(idx_to_thal), dropout=exp_cfg["dropout"], n_genes=n_genes).to(device)
