@@ -19,6 +19,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.metrics import f1_score
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from baseline_model import BaselineRankingModel
 from baseline_model_Microglia import BaselineRankingModelMicroglia, CERAD_CLASS_ORDER, BRAAK_TO_IDX
@@ -104,6 +105,8 @@ def parse_args():
                         help="Must match value used in create_raw_expression_data")
     parser.add_argument("--n_permute", type=int, default=1,
                         help="Number of permutation repeats per gene (for stability); mean F1 drop is used")
+    parser.add_argument("--log_base", type=str, default="run_new",
+                        help="Base directory for TensorBoard logs (default: run_new)")
     return parser.parse_args()
 
 
@@ -237,6 +240,7 @@ def run_permutation_importance_expression(args):
     device = torch.device(args.device)
     rng = np.random.default_rng(42)
     gene_f1_drops = defaultdict(list)
+    baseline_f1_list = []
 
     for test_fold_idx in range(n_folds):
         print(f"\n{'='*60}\nTest fold {test_fold_idx + 1}/{n_folds} (expression {args.cell_type})\n{'='*60}")
@@ -277,9 +281,24 @@ def run_permutation_importance_expression(args):
             criterion_ptau = {"mse": nn.MSELoss(), "mae": nn.L1Loss(), "huber": nn.HuberLoss()}[args.loss_ptau]
             criterion_thal = nn.CrossEntropyLoss()
             train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-            for _ in range(args.epochs):
-                train_epoch(model, train_loader, criterion_ptau, criterion_thal, optimizer, device)
+            test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
             compute_f1 = lambda m, loader: _compute_f1_astrocytes(m, loader, device, idx_to_thal)
+            log_dir = os.path.join(args.log_base, f"{args.region}_{args.cell_type}_expression_{args.experiment}_testfold{test_fold_idx+1}")
+            writer = SummaryWriter(log_dir)
+            best_f1, best_state = -1.0, None
+            for epoch in range(args.epochs):
+                train_loss, train_ptau_loss, train_thal_loss = train_epoch(model, train_loader, criterion_ptau, criterion_thal, optimizer, device)
+                writer.add_scalar("Loss/Train", train_loss, epoch)
+                writer.add_scalar("Loss/Train_Ptau", train_ptau_loss, epoch)
+                writer.add_scalar("Loss/Train_Thal", train_thal_loss, epoch)
+                f1 = compute_f1(model, test_loader)
+                writer.add_scalar("Metrics/Test_F1", f1, epoch)
+                if f1 > best_f1:
+                    best_f1 = f1
+                    best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            if best_state is not None:
+                model.load_state_dict(best_state)
+            baseline_f1 = best_f1
         else:
             train_ds = EmbeddingDatasetMicroglia(train_X, train_cerad, train_braak)
             test_ds = EmbeddingDatasetMicroglia(test_X_orig, test_cerad, test_braak)
@@ -292,13 +311,27 @@ def run_permutation_importance_expression(args):
             criterion_cerad = nn.CrossEntropyLoss()
             criterion_braak = nn.CrossEntropyLoss()
             train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-            for _ in range(args.epochs):
-                train_epoch_microglia(model, train_loader, criterion_cerad, criterion_braak, optimizer, device)
+            test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
             compute_f1 = lambda m, loader: _compute_f1_microglia(m, loader, device)
+            log_dir = os.path.join(args.log_base, f"{args.region}_{args.cell_type}_expression_{args.experiment}_testfold{test_fold_idx+1}")
+            writer = SummaryWriter(log_dir)
+            best_f1, best_state = -1.0, None
+            for epoch in range(args.epochs):
+                train_loss = train_epoch_microglia(model, train_loader, criterion_cerad, criterion_braak, optimizer, device)
+                writer.add_scalar("Loss/Train", train_loss, epoch)
+                f1 = compute_f1(model, test_loader)
+                writer.add_scalar("Metrics/Test_F1", f1, epoch)
+                if f1 > best_f1:
+                    best_f1 = f1
+                    best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            if best_state is not None:
+                model.load_state_dict(best_state)
+            baseline_f1 = best_f1
 
-        test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
-        baseline_f1 = compute_f1(model, test_loader)
-        print(f"  Baseline F1: {baseline_f1:.4f}")
+        baseline_f1_list.append(baseline_f1)
+        writer.add_scalar("Metrics/Best_F1", baseline_f1, 0)
+        writer.close()
+        print(f"  Best F1: {baseline_f1:.4f}")
 
         for g in range(n_genes):
             drops = []
@@ -319,6 +352,7 @@ def run_permutation_importance_expression(args):
             if (g + 1) % 200 == 0:
                 print(f"  Gene {g + 1}/{n_genes} done")
 
+    print(f"\nAverage best F1 across {n_folds} folds: {np.mean(baseline_f1_list):.4f}")
     return _aggregate_and_rank(gene_f1_drops, gene_names, n_folds)
 
 
@@ -358,6 +392,7 @@ def run_permutation_importance_embedding(args):
         gene_names = [f"gene_{i}" for i in range(n_genes)]
 
     gene_f1_drops = defaultdict(list)
+    baseline_f1_list = []
 
     for test_fold_idx in range(n_folds):
         print(f"\n{'='*60}\nTest fold {test_fold_idx + 1}/{n_folds} (embedding {args.cell_type})\n{'='*60}")
@@ -419,9 +454,27 @@ def run_permutation_importance_embedding(args):
                 lambda_entropy = 0.0
             optimizer = torch.optim.Adam(model.parameters(), lr=exp_cfg["lr"], weight_decay=exp_cfg["weight_decay"])
             train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-            for _ in range(args.epochs):
-                train_epoch(model, train_loader, criterion_ptau, criterion_thal, optimizer, device, lambda_entropy=lambda_entropy)
+            ge_str = "_ge" if args.gene_encoder else ""
+            attn_str = "_attn" if args.attention else ""
+            pca_str = f"_pca{args.pca_components}" if args.pca_components else ""
+            test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
             compute_f1 = lambda m, loader: _compute_f1_astrocytes(m, loader, device, idx_to_thal)
+            log_dir = os.path.join(args.log_base, f"{args.region}_{args.cell_type}_embedding{ge_str}{attn_str}{pca_str}_{args.experiment}_testfold{test_fold_idx+1}")
+            writer = SummaryWriter(log_dir)
+            best_f1, best_state = -1.0, None
+            for epoch in range(args.epochs):
+                train_loss, train_ptau_loss, train_thal_loss = train_epoch(model, train_loader, criterion_ptau, criterion_thal, optimizer, device, lambda_entropy=lambda_entropy)
+                writer.add_scalar("Loss/Train", train_loss, epoch)
+                writer.add_scalar("Loss/Train_Ptau", train_ptau_loss, epoch)
+                writer.add_scalar("Loss/Train_Thal", train_thal_loss, epoch)
+                f1 = compute_f1(model, test_loader)
+                writer.add_scalar("Metrics/Test_F1", f1, epoch)
+                if f1 > best_f1:
+                    best_f1 = f1
+                    best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            if best_state is not None:
+                model.load_state_dict(best_state)
+            baseline_f1 = best_f1
         else:
             train_ds = EmbeddingDatasetMicroglia(train_input, train_cerad, train_braak)
             test_ds = EmbeddingDatasetMicroglia(test_input, test_cerad, test_braak)
@@ -438,13 +491,30 @@ def run_permutation_importance_embedding(args):
             criterion_braak = nn.CrossEntropyLoss()
             optimizer = torch.optim.Adam(model.parameters(), lr=exp_cfg["lr"], weight_decay=exp_cfg["weight_decay"])
             train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-            for _ in range(args.epochs):
-                train_epoch_microglia(model, train_loader, criterion_cerad, criterion_braak, optimizer, device, lambda_entropy=lambda_entropy)
+            ge_str = "_ge" if args.gene_encoder else ""
+            attn_str = "_attn" if args.attention else ""
+            pca_str = f"_pca{args.pca_components}" if args.pca_components else ""
+            test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
             compute_f1 = lambda m, loader: _compute_f1_microglia(m, loader, device)
+            log_dir = os.path.join(args.log_base, f"{args.region}_{args.cell_type}_embedding{ge_str}{attn_str}{pca_str}_{args.experiment}_testfold{test_fold_idx+1}")
+            writer = SummaryWriter(log_dir)
+            best_f1, best_state = -1.0, None
+            for epoch in range(args.epochs):
+                train_loss = train_epoch_microglia(model, train_loader, criterion_cerad, criterion_braak, optimizer, device, lambda_entropy=lambda_entropy)
+                writer.add_scalar("Loss/Train", train_loss, epoch)
+                f1 = compute_f1(model, test_loader)
+                writer.add_scalar("Metrics/Test_F1", f1, epoch)
+                if f1 > best_f1:
+                    best_f1 = f1
+                    best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            if best_state is not None:
+                model.load_state_dict(best_state)
+            baseline_f1 = best_f1
 
-        test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
-        baseline_f1 = compute_f1(model, test_loader)
-        print(f"  Baseline F1: {baseline_f1:.4f}")
+        baseline_f1_list.append(baseline_f1)
+        writer.add_scalar("Metrics/Best_F1", baseline_f1, 0)
+        writer.close()
+        print(f"  Best F1: {baseline_f1:.4f}")
 
         for g in range(n_genes):
             drops = []
@@ -470,6 +540,7 @@ def run_permutation_importance_embedding(args):
             if (g + 1) % 200 == 0:
                 print(f"  Gene {g + 1}/{n_genes} done")
 
+    print(f"\nAverage best F1 across {n_folds} folds: {np.mean(baseline_f1_list):.4f}")
     return _aggregate_and_rank(gene_f1_drops, gene_names, n_folds)
 
 
