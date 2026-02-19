@@ -1,0 +1,13 @@
+region,cell_type,run,experiment,gene_encoder,attention,loss_ptau,pca_components,avg_f1,avg_mse,avg_mae,dropout,weight_decay,lr,lambda_entropy,error
+EC,Astrocytes,geFalse_attnTrue_none_pca2_baseline,baseline,False,True,none,2,0.2375,0.7569624319233468,0.6917057492149372,0.2,0.1,0.001,0.001,
+EC,Astrocytes,geFalse_attnTrue_none_pca4_baseline,baseline,False,True,none,4,0.425,0.7628078963045601,0.7112770742969587,0.2,0.1,0.001,0.001,
+EC,Astrocytes,geFalse_attnTrue_none_pca8_baseline,baseline,False,True,none,8,0.1708333333333333,0.7537631067392357,0.7666071075946093,0.2,0.1,0.001,0.001,
+EC,Astrocytes,geFalse_attnTrue_none_pca16_baseline,baseline,False,True,none,16,0.17777777777777776,0.5398002259956736,0.6081834575161338,0.2,0.1,0.001,0.001,
+EC,Astrocytes,geFalse_attnFalse_none_pca2_baseline,baseline,False,False,none,2,0.19583333333333333,1.01675801144582,0.8332894050205748,0.2,0.1,0.001,0.001,
+EC,Astrocytes,geFalse_attnFalse_none_pca4_baseline,baseline,False,False,none,4,0.3,0.23997431158895294,0.35672294860705733,0.2,0.1,0.001,0.001,
+EC,Astrocytes,geFalse_attnFalse_none_pca8_baseline,baseline,False,False,none,8,0.175,0.6203313447528637,0.6246257523695629,0.2,0.1,0.001,0.001,
+EC,Astrocytes,geFalse_attnFalse_none_pca16_baseline,baseline,False,False,none,16,0.31666666666666665,0.26133156197371205,0.42319262120872736,0.2,0.1,0.001,0.001,
+EC,Astrocytes,geTrue_attnFalse_none_pca2_baseline,baseline,True,False,none,2,0.25416666666666665,0.6882504456605153,0.5130661426422496,0.2,0.1,0.001,0.001,
+EC,Astrocytes,geTrue_attnFalse_none_pca4_baseline,baseline,True,False,none,4,0.30694444444444446,0.6535298368558233,0.6726711668695013,0.2,0.1,0.001,0.001,
+EC,Astrocytes,geTrue_attnFalse_none_pca8_baseline,baseline,True,False,none,8,0.38333333333333336,4.170553913238701,0.940452620231857,0.2,0.1,0.001,0.001,
+EC,Astrocytes,geTrue_attnFalse_none_pca16_baseline,baseline,True,False,none,16,0.20555555555555555,0.32594202701423886,0.44562073606842506,0.2,0.1,0.001,0.001,

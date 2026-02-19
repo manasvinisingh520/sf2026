@@ -12,10 +12,8 @@ class BaselineRankingModel(nn.Module):
 
         self.use_attention = use_attention
 
-        # Hardcoded hidden layer dimensions
-        hidden_dim1 = 8
-        hidden_dim2 = 4
-        hidden_dim3 = 4
+        # Minimal hidden size for low sample count (~20 samples); single layer to reduce overfitting
+        hidden_dim = 1
 
         # Handle 2D input (n_genes, n_dims) or 1D input (flattened)
         if input_shape is not None and len(input_shape) == 2:
@@ -43,27 +41,21 @@ class BaselineRankingModel(nn.Module):
             self.attention = None
             first_layer_input = input_dim
 
-        # Shared layers
+        # Shared: single hidden layer (minimal params for ~20 samples)
         self.shared = nn.Sequential(
-            nn.Linear(first_layer_input, hidden_dim1),
+            nn.Linear(first_layer_input, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim1, hidden_dim2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim2, hidden_dim3),
-            nn.ReLU(),
-            nn.Dropout(dropout)
         )
 
         # Head 1: P-tau regression (ReLU output for log1p(p-tau)), already have log1p applied in the data
-        self.ptau_head = nn.Linear(hidden_dim3, 1)
+        self.ptau_head = nn.Linear(hidden_dim, 1)
 
         # Head 2: Thal classification (softmax)
         if n_thal_classes is None:
             raise ValueError("n_thal_classes must be specified")
         # do NOT apply softmax here, it will be applied in the loss function
-        self.thal_head = nn.Linear(hidden_dim3, n_thal_classes)
+        self.thal_head = nn.Linear(hidden_dim, n_thal_classes)
 
     def forward(self, x):
         # Apply attention only for 2D input (batch, n_genes, n_dims)
@@ -77,5 +69,5 @@ class BaselineRankingModel(nn.Module):
 
         shared_features = self.shared(x)
         ptau_pred = self.ptau_head(shared_features).squeeze(-1)
-        thal_pred = self.thal_head(shared_features)  # (batch_size, n_thal_classes) with softmax
+        thal_pred = self.thal_head(shared_features)  # (batch_size, n_thal_classes) logits (no softmax; CrossEntropyLoss applies it)
         return ptau_pred, thal_pred

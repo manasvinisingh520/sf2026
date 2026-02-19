@@ -160,78 +160,91 @@ def main(args):
     elif args.loss_ptau == 'huber':
         criterion_ptau = nn.HuberLoss()
 
-    all_thal_labels = []
-    for thal_fold in thal_folds:
-        if isinstance(thal_fold, (list, np.ndarray)):
-            all_thal_labels.extend(thal_fold)
-        else:
-            all_thal_labels.extend(thal_fold.values if hasattr(thal_fold, 'values') else thal_fold)
-    all_thal_labels_int = [int(x) for x in all_thal_labels]
-    thal_classes = sorted(set(all_thal_labels_int))
-    thal_to_idx = {c: i for i, c in enumerate(thal_classes)}
-    idx_to_thal = {i: c for c, i in thal_to_idx.items()}
-    n_thal_classes = len(thal_classes)
+    pool_str = args.pooling if args.pooling is not None else "None"
+    cache_path = os.path.join("data", "model_data", f"{args.region}_patient_level_pooling_{pool_str}.pkl")
+    use_cache = os.path.exists(cache_path) and (not getattr(args, "recompute", False))
+    if use_cache and os.path.getmtime(cache_path) >= os.path.getmtime(data_path):
+        print(f"Loading precomputed patient-level data from cache: {cache_path}")
+        with open(cache_path, "rb") as f:
+            cache = pickle.load(f)
+        all_fold_patient_data = cache["all_fold_patient_data"]
+        thal_to_idx = cache["thal_to_idx"]
+        idx_to_thal = cache["idx_to_thal"]
+        n_thal_classes = cache["n_thal_classes"]
+        n_folds = len(all_fold_patient_data)
+        print(f"  {n_folds} folds loaded. Skip preparation.")
+    else:
+        all_thal_labels = []
+        for thal_fold in thal_folds:
+            if isinstance(thal_fold, (list, np.ndarray)):
+                all_thal_labels.extend(thal_fold)
+            else:
+                all_thal_labels.extend(thal_fold.values if hasattr(thal_fold, "values") else thal_fold)
+        all_thal_labels_int = [int(x) for x in all_thal_labels]
+        thal_classes = sorted(set(all_thal_labels_int))
+        thal_to_idx = {c: i for i, c in enumerate(thal_classes)}
+        idx_to_thal = {i: c for c, i in thal_to_idx.items()}
+        n_thal_classes = len(thal_classes)
+        n_folds = len(embeddings_folds)
+        all_fold_patient_data = []
+
+        print(f"\n{'='*60}")
+        print("Pipeline: cells -> genes -> patient embedding (StandardScaler+PCA in CV)")
+        print(f"{'='*60}")
+
+        for fold_idx in range(n_folds):
+            print(f"\nPreparing fold {fold_idx + 1}/{n_folds}...")
+
+            fold_embeddings = embeddings_folds[fold_idx]
+            fold_ptau = ptau_folds[fold_idx]
+            fold_thal = thal_folds[fold_idx]
+            fold_patient_info = patient_info_folds[fold_idx]
+
+            if args.pooling is None:
+                pooled_embeddings = fold_embeddings
+            else:
+                pooled_embeddings = apply_pooling(fold_embeddings, method=args.pooling)
+            print(f"  Pooled embeddings shape: {pooled_embeddings.shape}")
+
+            patient_embeddings = []
+            patient_ptau = []
+            patient_thal = []
+            cell_idx = 0
+            for patient_idx, (patient_name, cell_names) in enumerate(fold_patient_info.items()):
+                n_cells_patient = len(cell_names)
+                patient_cell_embeddings = pooled_embeddings[cell_idx : cell_idx + n_cells_patient]
+                patient_emb = np.mean(patient_cell_embeddings, axis=0)
+                patient_embeddings.append(patient_emb)
+                patient_ptau.append(fold_ptau[patient_idx])
+                patient_thal.append(fold_thal[patient_idx])
+                cell_idx += n_cells_patient
+
+            patient_embeddings = np.array(patient_embeddings)
+            patient_ptau = np.array(patient_ptau)
+            patient_thal = np.array(patient_thal)
+            print(f"  Patient embeddings shape: {patient_embeddings.shape}")
+
+            patient_ptau_log = np.log1p(patient_ptau)
+            patient_thal_int = [int(t) for t in patient_thal]
+            patient_thal_encoded = np.array([thal_to_idx[t] for t in patient_thal_int])
+            all_fold_patient_data.append({
+                "embeddings": patient_embeddings,
+                "ptau": patient_ptau_log,
+                "thal": patient_thal_encoded,
+            })
+            print(f"  Number of patients: {len(patient_ptau)}")
+
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "wb") as f:
+            pickle.dump({
+                "all_fold_patient_data": all_fold_patient_data,
+                "thal_to_idx": thal_to_idx,
+                "idx_to_thal": idx_to_thal,
+                "n_thal_classes": n_thal_classes,
+            }, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"\nSaved patient-level cache to {cache_path} (reuse in next runs).")
+
     criterion_thal = nn.CrossEntropyLoss()
-
-    # Prepare patient-level data for all folds first
-    n_folds = len(embeddings_folds)
-    all_fold_patient_data = []  # List of dicts, one per fold
-
-    # Pipeline: cells -> genes -> patient embedding -> StandardScaler -> PCA -> model
-    print(f"\n{'='*60}")
-    print("Pipeline: cells -> genes -> patient embedding (StandardScaler+PCA in CV)")
-    print(f"{'='*60}")
-
-    for fold_idx in range(n_folds):
-        print(f"\nPreparing fold {fold_idx + 1}/{n_folds}...")
-
-        # Step 1: cells -> genes (optional pooling across genes)
-        fold_embeddings = embeddings_folds[fold_idx]  # (n_cells, n_genes, n_dims)
-        fold_ptau = ptau_folds[fold_idx]
-        fold_thal = thal_folds[fold_idx]
-        fold_patient_info = patient_info_folds[fold_idx]
-
-        if args.pooling is None:
-            pooled_embeddings = fold_embeddings  # Keep (n_cells, n_genes, n_dims)
-        else:
-            pooled_embeddings = apply_pooling(fold_embeddings, method=args.pooling)  # (n_cells, n_dims)
-        print(f"  Pooled embeddings shape: {pooled_embeddings.shape}")
-
-        # Step 2: cells -> patient embedding (mean across cells per patient)
-        patient_embeddings = []
-        patient_ptau = []
-        patient_thal = []
-
-        cell_idx = 0
-        for patient_idx, (patient_name, cell_names) in enumerate(fold_patient_info.items()):
-            n_cells_patient = len(cell_names)
-            patient_cell_embeddings = pooled_embeddings[cell_idx:cell_idx + n_cells_patient]
-
-            # Aggregate patient cells (mean pooling across cells)
-            patient_emb = np.mean(patient_cell_embeddings, axis=0)
-
-            patient_embeddings.append(patient_emb)
-            patient_ptau.append(fold_ptau[patient_idx])
-            patient_thal.append(fold_thal[patient_idx])
-
-            cell_idx += n_cells_patient
-
-        patient_embeddings = np.array(patient_embeddings)
-        patient_ptau = np.array(patient_ptau)
-        patient_thal = np.array(patient_thal)
-
-        print(f"  Patient embeddings shape: {patient_embeddings.shape}")
-
-        patient_ptau_log = np.log1p(patient_ptau)
-        patient_thal_int = [int(t) for t in patient_thal]
-        patient_thal_encoded = np.array([thal_to_idx[t] for t in patient_thal_int])
-        all_fold_patient_data.append({
-            'embeddings': patient_embeddings,
-            'ptau': patient_ptau_log,
-            'thal': patient_thal_encoded
-        })
-
-        print(f"  Number of patients: {len(patient_ptau)}")
 
     # Leave-one-fold-out cross-validation
     fold_results = []
@@ -346,10 +359,16 @@ def main(args):
                 print(f"  Warning: Could not delete {log_dir}: {e}. TensorBoard may have it open. Continuing anyway.")
         writer = SummaryWriter(log_dir)
 
+        best_test_loss = float('inf')
         best_test_f1 = float('-inf')
         best_epoch = 0
         best_test_mse = None
         best_test_mae = None
+        best_state = None
+        patience = getattr(args, 'patience', 20)
+        if patience is not None and patience <= 0:
+            patience = None
+        epochs_without_improvement = 0
 
         for epoch in range(args.epochs):
             train_loss, train_ptau_loss, train_thal_loss = train_epoch(
@@ -368,16 +387,28 @@ def main(args):
             writer.add_scalar('Metrics/Test_MAE', test_mae, epoch)
             writer.add_scalar('Metrics/Test_F1', test_f1, epoch)
 
-            if test_f1 > best_test_f1:
+            if test_loss < best_test_loss:
+                best_test_loss = test_loss
                 best_test_f1 = test_f1
                 best_epoch = epoch
                 best_test_mse = test_mse
                 best_test_mae = test_mae
+                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
 
-            if (epoch + 1) % 10 == 0:
+            if (epoch + 1) % 10 == 0 and getattr(args, "verbose", True):
                 print(f"Epoch {epoch+1}/{args.epochs} - Train Loss: {train_loss:.4f}, "
                       f"Test Loss: {test_loss:.4f}, Test F1: {test_f1:.4f}, Test MAE: {test_mae:.4f}")
 
+            if patience is not None and epochs_without_improvement >= patience:
+                if getattr(args, "verbose", True):
+                    print(f"  Early stopping at epoch {epoch+1} (no test loss improvement for {patience} epochs).")
+                break
+
+        if best_state is not None:
+            model.load_state_dict(best_state)
         writer.close()
 
         print(f"\nTest Fold {test_fold_idx + 1} Best F1: {best_test_f1:.4f} at epoch {best_epoch + 1}")
@@ -435,6 +466,14 @@ if __name__ == "__main__":
                        help='Use GeneEncoderModel (gene encoder + attention pooling); requires pooling=None')
     parser.add_argument('--lambda_entropy', type=float, default=1e-3,
                        help='Gene entropy regularization weight (default: 1e-3, gene_encoder only)')
+    parser.add_argument('--recompute', action='store_true',
+                       help='Force recompute patient-level data and overwrite cache (default: use cache if present and newer than data)')
+    parser.add_argument('--verbose', action='store_true', default=True,
+                       help='Print per-epoch progress (default: True). Set to False when running many experiments.')
+    parser.add_argument('--no_verbose', action='store_false', dest='verbose',
+                       help='Disable per-epoch printing (quiet mode for batch runs)')
+    parser.add_argument('--patience', type=int, default=20,
+                       help='Early stopping: stop if test loss does not improve for this many epochs (default: 20). Set to 0 to disable.')
     args = parser.parse_args()
 
     main(args)

@@ -50,7 +50,9 @@ def main(args):
     print(f"Using device: {device}")
 
     # Loss functions
-    if args.loss_ptau == "mse":
+    if args.loss_ptau is None or (isinstance(args.loss_ptau, str) and args.loss_ptau.lower() == "none"):
+        criterion_ptau = None
+    elif args.loss_ptau == "mse":
         criterion_ptau = nn.MSELoss()
     elif args.loss_ptau == "mae":
         criterion_ptau = nn.L1Loss()
@@ -160,10 +162,16 @@ def main(args):
         )
         writer = SummaryWriter(log_dir)
 
+        best_test_loss = float("inf")
         best_test_f1 = float("-inf")
         best_epoch = 0
         best_test_mse = None
         best_test_mae = None
+        best_state = None
+        patience = getattr(args, "patience", 20)
+        if patience is not None and patience <= 0:
+            patience = None
+        epochs_without_improvement = 0
 
         for epoch in range(args.epochs):
             train_loss, train_ptau_loss, train_thal_loss = train_epoch(
@@ -181,18 +189,30 @@ def main(args):
             writer.add_scalar("Metrics/Test_MAE", test_mae, epoch)
             writer.add_scalar("Metrics/Test_F1", test_f1, epoch)
 
-            if test_f1 > best_test_f1:
+            if test_loss < best_test_loss:
+                best_test_loss = test_loss
                 best_test_f1 = test_f1
                 best_epoch = epoch
                 best_test_mse = test_mse
                 best_test_mae = test_mae
+                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
 
-            if (epoch + 1) % 10 == 0:
+            if (epoch + 1) % 10 == 0 and getattr(args, "verbose", True):
                 print(
                     f"Epoch {epoch+1}/{args.epochs} - Train Loss: {train_loss:.4f}, "
                     f"Test Loss: {test_loss:.4f}, Test F1: {test_f1:.4f}, Test MAE: {test_mae:.4f}"
                 )
 
+            if patience is not None and epochs_without_improvement >= patience:
+                if getattr(args, "verbose", True):
+                    print(f"  Early stopping at epoch {epoch+1} (no test loss improvement for {patience} epochs).")
+                break
+
+        if best_state is not None:
+            model.load_state_dict(best_state)
         writer.close()
 
         print(f"\nTest Fold {test_fold_idx + 1} Best F1: {best_test_f1:.4f} at epoch {best_epoch + 1}")
@@ -235,8 +255,8 @@ if __name__ == "__main__":
         "--loss_ptau",
         type=str,
         default="mse",
-        choices=["mse", "mae", "huber"],
-        help="Loss function for ptau prediction",
+        choices=["mse", "mae", "huber", "none"],
+        help="Loss function for ptau prediction (none to omit ptau loss)",
     )
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--epochs", type=int, default=1000, help="Number of epochs")
@@ -253,6 +273,9 @@ if __name__ == "__main__":
     parser.add_argument("--attention_heads", type=int, default=1, help="Number of attention heads when --attention is set (default: 1)")
     parser.add_argument("--pca_components", type=int, default=None, help="PCA components (None = no PCA). Reduces n_genes to this many dimensions.")
     parser.add_argument("--log_base", type=str, default="runs", help="Base directory for TensorBoard logs (default: runs)")
+    parser.add_argument("--verbose", action="store_true", default=True, help="Print per-epoch progress (default: True).")
+    parser.add_argument("--no_verbose", action="store_false", dest="verbose", help="Disable per-epoch printing (quiet mode for batch runs)")
+    parser.add_argument("--patience", type=int, default=20, help="Early stopping: stop if test loss does not improve for this many epochs (default: 20). Set to 0 to disable.")
 
     main(parser.parse_args())
 

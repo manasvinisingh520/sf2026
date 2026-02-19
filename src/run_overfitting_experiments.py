@@ -29,19 +29,14 @@ EXPERIMENTS = [
 ]
 
 EXPERIMENTS = [
-        {"name": "highest_lambda_entropy", "dropout": 0.2, "weight_decay": 0.1, "lr": 0.001, "lambda_entropy": 1e-1},
+    {"name": "baseline", "dropout": 0.2, "weight_decay": 0.1, "lr": 0.001, "lambda_entropy": 1e-3},
 ]
 
 GENE_ENCODER_OPTS = [False, True]
 ATTENTION_OPTS = [True, False]
-LOSS_PTAU_OPTS = ["huber", "mse", "mae"]
+LOSS_PTAU_OPTS = ["huber", "mse", "mae", "none"]
+LOSS_PTAU_OPTS = ["none"]
 PCA_OPTS = [2, 4, 8, 16]
-
-GENE_ENCODER_OPTS = [False]
-ATTENTION_OPTS = [False]
-LOSS_PTAU_OPTS = ["mae"]
-PCA_OPTS = [16]
-
 
 def build_args(region, cell_type, exp, gene_encoder, attention, loss_ptau, pca_components, base_args):
     pooling = None if gene_encoder else "mean"
@@ -65,6 +60,7 @@ def build_args(region, cell_type, exp, gene_encoder, attention, loss_ptau, pca_c
         lambda_entropy=exp["lambda_entropy"],
         log_base=log_base,
         exp_id=exp_id,
+        verbose=False,
     )
 
 
@@ -190,7 +186,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run overfitting experiments on embedding data")
     parser.add_argument("--region", type=str, required=True, help="Region (e.g., EC, ITG, PFC)")
     parser.add_argument("--cell_type", type=str, default="Astrocytes", help="Cell type (use run_overfitting_experiments_microglia.py for Microglia)")
-    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--device", type=str, default="cuda" if __import__("torch").cuda.is_available() else "cpu")
     parser.add_argument("--attention_heads", type=int, default=1)

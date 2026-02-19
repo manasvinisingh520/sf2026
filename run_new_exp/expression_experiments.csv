@@ -1,0 +1,9 @@
+run,experiment,attention,loss_ptau,pca_components,dropout,weight_decay,lr,lambda_entropy,avg_f1,avg_mse,avg_mae,error
+baseline_attnTrue_lossnone_pca2,baseline,True,none,2,0.2,0.1,0.001,0.001,0.24305555555555555,8.67911020267645,1.5606318150336544,
+baseline_attnTrue_lossnone_pca4,baseline,True,none,4,0.2,0.1,0.001,0.001,0.11111111111111109,8.632915965642438,1.3022088340173166,
+baseline_attnTrue_lossnone_pca8,baseline,True,none,8,0.2,0.1,0.001,0.001,0.2986111111111111,6.343098283089464,1.4130101359138885,
+baseline_attnTrue_lossnone_pcaNone,baseline,True,none,,0.2,0.1,0.001,0.001,0.2708333333333333,0.8590406242052219,0.6900273310020566,
+baseline_attnFalse_lossnone_pca2,baseline,False,none,2,0.2,0.1,0.001,0.001,0.275,54.994542014703484,2.9577199804286165,
+baseline_attnFalse_lossnone_pca4,baseline,False,none,4,0.2,0.1,0.001,0.001,0.28888888888888886,0.8328238914000646,0.7071346553663413,
+baseline_attnFalse_lossnone_pca8,baseline,False,none,8,0.2,0.1,0.001,0.001,0.1111111111111111,48.471916066107816,2.5892999373997254,
+baseline_attnFalse_lossnone_pcaNone,baseline,False,none,,0.2,0.1,0.001,0.001,0.22916666666666666,3.320154803653533,1.3541083199282489,

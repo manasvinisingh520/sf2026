@@ -30,6 +30,10 @@ ATTENTION_OPTS = [True, False]
 LOSS_PTAU_OPTS = ["huber", "mse", "mae"]
 PCA_OPTS = [2, 4, 8, None]
 
+EXPERIMENTS = [
+    {"name": "baseline", "dropout": 0.2, "weight_decay": 0.1, "lr": 0.001, "lambda_entropy": 1e-3},
+]
+LOSS_PTAU_OPTS = ["none"]
 
 def build_args(region, exp, attention, loss_ptau, pca_components, base_args):
     exp_id = f"attn{attention}_{loss_ptau}_pca{pca_components}_{exp['name']}"
@@ -48,6 +52,7 @@ def build_args(region, exp, attention, loss_ptau, pca_components, base_args):
         pca_components=pca_components,
         log_base=log_base,
         exp_id=exp_id,
+        verbose=False,
     )
 
 
