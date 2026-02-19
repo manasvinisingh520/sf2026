@@ -128,9 +128,28 @@ def find_subclusters_distribution(data, cluster_data):
     return subclusters_count
 
 if __name__ == "__main__":
-    # Load data
     metadata_df = load_metadata()
     for cluster_id in range(7):
         cluster_data = load_cluster_metadata(cluster_id)
-        subclusters_count = find_subclusters_distribution(metadata_df, cluster_data)
-        print(f"Cluster {cluster_id}: {subclusters_count}")
+        cell_names = cluster_data.get("cell_names", [])
+        n_cells = len(cell_names)
+
+        print(f"\n{'='*60}")
+        print(f"Cluster {cluster_id} (n_cells={n_cells})")
+        print(f"{'='*60}")
+
+        male, female, unknown = find_gender_distribution(metadata_df, cluster_data)
+        print(f"  Gender: M={male}, F={female}, unknown={unknown}")
+
+        apoe_23, apoe_24, apoe_34, apoe_22, apoe_33, apoe_44 = find_apoe_distribution(metadata_df, cluster_data)
+        apoe_dist = {"2/3": apoe_23, "2/4": apoe_24, "3/4": apoe_34, "2/2": apoe_22, "3/3": apoe_33, "4/4": apoe_44}
+        print(f"  APOE: {apoe_dist}")
+
+        stage = find_stage_distribution(metadata_df, cluster_data)
+        print(f"  Stage (Pathology): {stage}")
+
+        braak = find_braak_distribution(metadata_df, cluster_data)
+        print(f"  Braak: {braak}")
+
+        subclusters = find_subclusters_distribution(metadata_df, cluster_data)
+        print(f"  Microglia subclusters: {subclusters}")

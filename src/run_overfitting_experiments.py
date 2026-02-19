@@ -28,10 +28,19 @@ EXPERIMENTS = [
     {"name": "all_strong", "dropout": 0.5, "weight_decay": 1.0, "lr": 1e-4, "lambda_entropy": 1e-1},
 ]
 
+EXPERIMENTS = [
+        {"name": "highest_lambda_entropy", "dropout": 0.2, "weight_decay": 0.1, "lr": 0.001, "lambda_entropy": 1e-1},
+]
+
 GENE_ENCODER_OPTS = [False, True]
 ATTENTION_OPTS = [True, False]
 LOSS_PTAU_OPTS = ["huber", "mse", "mae"]
 PCA_OPTS = [2, 4, 8, 16]
+
+GENE_ENCODER_OPTS = [False]
+ATTENTION_OPTS = [False]
+LOSS_PTAU_OPTS = ["mae"]
+PCA_OPTS = [16]
 
 
 def build_args(region, cell_type, exp, gene_encoder, attention, loss_ptau, pca_components, base_args):

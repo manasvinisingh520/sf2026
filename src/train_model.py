@@ -177,15 +177,15 @@ def main(args):
     n_folds = len(embeddings_folds)
     all_fold_patient_data = []  # List of dicts, one per fold
 
-    # Pipeline: cells → genes → patient embedding → StandardScaler → PCA → model
+    # Pipeline: cells -> genes -> patient embedding -> StandardScaler -> PCA -> model
     print(f"\n{'='*60}")
-    print("Pipeline: cells → genes → patient embedding (StandardScaler+PCA in CV)")
+    print("Pipeline: cells -> genes -> patient embedding (StandardScaler+PCA in CV)")
     print(f"{'='*60}")
 
     for fold_idx in range(n_folds):
         print(f"\nPreparing fold {fold_idx + 1}/{n_folds}...")
 
-        # Step 1: cells → genes (optional pooling across genes)
+        # Step 1: cells -> genes (optional pooling across genes)
         fold_embeddings = embeddings_folds[fold_idx]  # (n_cells, n_genes, n_dims)
         fold_ptau = ptau_folds[fold_idx]
         fold_thal = thal_folds[fold_idx]
@@ -197,7 +197,7 @@ def main(args):
             pooled_embeddings = apply_pooling(fold_embeddings, method=args.pooling)  # (n_cells, n_dims)
         print(f"  Pooled embeddings shape: {pooled_embeddings.shape}")
 
-        # Step 2: cells → patient embedding (mean across cells per patient)
+        # Step 2: cells -> patient embedding (mean across cells per patient)
         patient_embeddings = []
         patient_ptau = []
         patient_thal = []

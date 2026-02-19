@@ -359,23 +359,122 @@ def find_rin_distribution(data, four_digit_ids):
 
 if __name__ == "__main__":
     import re
-    
+
     metadata = load_metadata()
+    # Collect four_digit_ids and n_cells per cluster
+    cluster_four_digit_ids = {}
+    cluster_n_cells = {}
     for cluster_id in range(7):
         cluster_data = load_cluster_data(cluster_id)
-        
-        # Extract 4-digit IDs from cell names once (format: "6289-MW-0053_bin2" -> "0053")
-        # Pattern: -XXXX_ where XXXX is 4 digits (matches "-0053_" in "6289-MW-0053_bin2")
-        cell_names = cluster_data.get('cell_names', [])
+        cell_names = cluster_data.get("cell_names", [])
         four_digit_ids = []
         for cell_name in cell_names:
-            # Match pattern like -0053_ or -0053-
-            match = re.search(r'-(\d{4})[_-]', str(cell_name))
+            match = re.search(r"-(\d{4})[_-]", str(cell_name))
             if match:
                 four_digit_ids.append(match.group(1))
-        
-        mean_rin, std_rin = find_rin_distribution(metadata, four_digit_ids)
-        if mean_rin is not None:
-            print(f"Cluster {cluster_id}: RIN mean={mean_rin:.2f}, SD={std_rin:.2f}")
+        cluster_four_digit_ids[cluster_id] = four_digit_ids
+        cluster_n_cells[cluster_id] = len(cell_names)
+
+    # Print by metric: all Braak, then all Patient, etc.
+    print(f"\n{'='*60}")
+    print("Braak (per cluster)")
+    print(f"{'='*60}")
+    for cluster_id in range(7):
+        four_digit_ids = cluster_four_digit_ids[cluster_id]
+        braak = find_braak_stage(metadata, four_digit_ids)
+        print(f"  Cluster {cluster_id}: {braak if braak else 'n/a'}")
+
+    print(f"\n{'='*60}")
+    print("Thal (per cluster)")
+    print(f"{'='*60}")
+    for cluster_id in range(7):
+        thal = find_thal_distribution(metadata, cluster_four_digit_ids[cluster_id])
+        print(f"  Cluster {cluster_id}: {thal if thal else 'n/a'}")
+
+    print(f"\n{'='*60}")
+    print("Patient / donor (per cluster)")
+    print(f"{'='*60}")
+    for cluster_id in range(7):
+        patient = find_patient_distribution(metadata, cluster_four_digit_ids[cluster_id])
+        if patient:
+            print(f"  Cluster {cluster_id}: n_donors={len(patient)}, {patient}")
         else:
-            print(f"Cluster {cluster_id}: No RIN values found")
+            print(f"  Cluster {cluster_id}: —")
+
+    print(f"\n{'='*60}")
+    print("Stage / Pathology (per cluster)")
+    print(f"{'='*60}")
+    for cluster_id in range(7):
+        stage = find_stage_distribution(metadata, cluster_four_digit_ids[cluster_id])
+        print(f"  Cluster {cluster_id}: {stage if stage else 'n/a'}")
+
+    print(f"\n{'='*60}")
+    print("Total tau (per cluster)")
+    print(f"{'='*60}")
+    for cluster_id in range(7):
+        total_tau_mean, total_tau_std = find_total_tau_distribution(metadata, cluster_four_digit_ids[cluster_id])
+        if total_tau_mean is not None:
+            print(f"  Cluster {cluster_id}: mean={total_tau_mean:.4f}, SD={total_tau_std:.4f}")
+        else:
+            print(f"  Cluster {cluster_id}: —")
+
+    print(f"\n{'='*60}")
+    print("Ptau/Total tau (per cluster)")
+    print(f"{'='*60}")
+    for cluster_id in range(7):
+        ptau_mean, ptau_std = find_ptau_total_tau_distribution(metadata, cluster_four_digit_ids[cluster_id])
+        if ptau_mean is not None:
+            print(f"  Cluster {cluster_id}: mean={ptau_mean:.4f}, SD={ptau_std:.4f}")
+        else:
+            print(f"  Cluster {cluster_id}: —")
+
+    print(f"\n{'='*60}")
+    print("AD (per cluster)")
+    print(f"{'='*60}")
+    for cluster_id in range(7):
+        ad = find_ad_distribution(metadata, cluster_four_digit_ids[cluster_id])
+        print(f"  Cluster {cluster_id}: {ad if ad else 'n/a'}")
+
+    print(f"\n{'='*60}")
+    print("APOE (per cluster)")
+    print(f"{'='*60}")
+    for cluster_id in range(7):
+        apoe = find_apoe_distribution(metadata, cluster_four_digit_ids[cluster_id])
+        print(f"  Cluster {cluster_id}: {apoe if apoe else 'n/a'}")
+
+    print(f"\n{'='*60}")
+    print("Age (per cluster)")
+    print(f"{'='*60}")
+    for cluster_id in range(7):
+        age_mean, age_std = find_age_distribution(metadata, cluster_four_digit_ids[cluster_id])
+        if age_mean is not None:
+            print(f"  Cluster {cluster_id}: mean={age_mean:.2f}, SD={age_std:.2f}")
+        else:
+            print(f"  Cluster {cluster_id}: —")
+
+    print(f"\n{'='*60}")
+    print("Sex (per cluster)")
+    print(f"{'='*60}")
+    for cluster_id in range(7):
+        sex = find_sex_distribution(metadata, cluster_four_digit_ids[cluster_id])
+        print(f"  Cluster {cluster_id}: {sex if sex else 'n/a'}")
+
+    print(f"\n{'='*60}")
+    print("PMI (per cluster)")
+    print(f"{'='*60}")
+    for cluster_id in range(7):
+        pmi_mean, pmi_std = find_pmi_distribution(metadata, cluster_four_digit_ids[cluster_id])
+        if pmi_mean is not None:
+            print(f"  Cluster {cluster_id}: mean={pmi_mean:.2f}, SD={pmi_std:.2f}")
+        else:
+            print(f"  Cluster {cluster_id}: —")
+
+    print(f"\n{'='*60}")
+    print("RIN (per cluster)")
+    print(f"{'='*60}")
+    for cluster_id in range(7):
+        mean_rin, std_rin = find_rin_distribution(metadata, cluster_four_digit_ids[cluster_id])
+        if mean_rin is not None:
+            print(f"  Cluster {cluster_id}: mean={mean_rin:.2f}, SD={std_rin:.2f}")
+        else:
+            print(f"  Cluster {cluster_id}: —")

@@ -354,6 +354,7 @@ def run_permutation_importance_expression(args):
                 print(f"  Gene {g + 1}/{n_genes} done")
 
     print(f"\nAverage best F1 across {n_folds} folds: {np.mean(baseline_f1_list):.4f}")
+    return
     return _aggregate_and_rank(gene_f1_drops, gene_names, n_folds)
 
 

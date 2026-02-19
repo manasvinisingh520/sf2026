@@ -108,7 +108,7 @@ def main(args):
     all_fold_patient_data = []
 
     print(f"\n{'='*60}")
-    print("Pipeline: cells → patient embedding (StandardScaler+PCA in CV)")
+    print("Pipeline: cells -> patient embedding (StandardScaler+PCA in CV)")
     print(f"{'='*60}")
 
     for fold_idx in range(n_folds):

@@ -302,7 +302,7 @@ for cluster_id in sorted(cluster_counts.keys()):
 print(f"\nSaving clusters to separate files:")
 all_cluster_ids = sorted(cluster_counts.keys())
 
-"""for cluster_id in all_cluster_ids:
+for cluster_id in all_cluster_ids:
     cluster_cell_indices = [i for i, label in enumerate(cluster_labels) if label == cluster_id]
     cluster_cell_names = [cell_names[i] for i in cluster_cell_indices]
     
@@ -317,7 +317,7 @@ all_cluster_ids = sorted(cluster_counts.keys())
         }, f)
     print(f"  ✓ Saved {len(cluster_cell_names)} cells from cluster {cluster_id}")
 
-print(f"\n✓ All {len(all_cluster_ids)} clusters saved successfully")"""
+print(f"\n✓ All {len(all_cluster_ids)} clusters saved successfully")
 
 # Compute 2D UMAP for visualization
 print("\nComputing 2D UMAP for visualization...")
