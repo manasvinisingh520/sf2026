@@ -7,13 +7,21 @@ import torch.nn as nn
 class BaselineRankingModel(nn.Module):
     """Baseline model with two heads: ptau regression and thal classification."""
 
-    def __init__(self, input_dim=16, input_shape=None, n_thal_classes=None, use_attention=False, num_heads=1, dropout=0.2):
+    def __init__(
+        self,
+        input_dim=16,
+        input_shape=None,
+        n_thal_classes=None,
+        use_attention=False,
+        num_heads=1,
+        dropout=0.2,
+        n_hidden_layers=1,
+        hidden_dim_3layer=32,
+    ):
         super(BaselineRankingModel, self).__init__()
 
         self.use_attention = use_attention
-
-        # Minimal hidden size for low sample count (~20 samples); single layer to reduce overfitting
-        hidden_dim = 1
+        self.n_hidden_layers = n_hidden_layers
 
         # Handle 2D input (n_genes, n_dims) or 1D input (flattened)
         if input_shape is not None and len(input_shape) == 2:
@@ -41,21 +49,42 @@ class BaselineRankingModel(nn.Module):
             self.attention = None
             first_layer_input = input_dim
 
-        # Shared: single hidden layer (minimal params for ~20 samples)
-        self.shared = nn.Sequential(
-            nn.Linear(first_layer_input, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-        )
+        if n_hidden_layers == 1:
+            # Minimal: single hidden layer for low sample count (~20 samples)
+            hidden_dim = 1
+            self.shared = nn.Sequential(
+                nn.Linear(first_layer_input, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+            )
+        elif n_hidden_layers == 3:
+            # Original 3-layer MLP
+            h = hidden_dim_3layer
+            self.shared = nn.Sequential(
+                nn.Linear(first_layer_input, h),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(h, h),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(h, h),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+            )
+            hidden_dim = h
+        else:
+            raise ValueError("n_hidden_layers must be 1 or 3")
+
+        self._hidden_dim = hidden_dim
 
         # Head 1: P-tau regression (ReLU output for log1p(p-tau)), already have log1p applied in the data
-        self.ptau_head = nn.Linear(hidden_dim, 1)
+        self.ptau_head = nn.Linear(self._hidden_dim, 1)
 
         # Head 2: Thal classification (softmax)
         if n_thal_classes is None:
             raise ValueError("n_thal_classes must be specified")
         # do NOT apply softmax here, it will be applied in the loss function
-        self.thal_head = nn.Linear(hidden_dim, n_thal_classes)
+        self.thal_head = nn.Linear(self._hidden_dim, n_thal_classes)
 
     def forward(self, x):
         # Apply attention only for 2D input (batch, n_genes, n_dims)

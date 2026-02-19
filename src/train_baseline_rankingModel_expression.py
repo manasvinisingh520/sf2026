@@ -143,7 +143,9 @@ def main(args):
             n_thal_classes=n_thal_classes,
             use_attention=args.attention,
             num_heads=args.attention_heads if args.attention else 1,
-            dropout=args.dropout
+            dropout=args.dropout,
+            n_hidden_layers=args.n_hidden_layers,
+            hidden_dim_3layer=args.hidden_dim_3layer,
         ).to(device)
 
         optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -152,10 +154,11 @@ def main(args):
         attention_suffix = "_attn" if args.attention else ""
         dropout_str = f"_drop{args.dropout}"
         wd_str = f"_wd{args.weight_decay}"
+        layers_str = f"_L{args.n_hidden_layers}" if args.n_hidden_layers == 3 else ""
         pca_str = f"_pca{pca_components}" if pca_components is not None else "_pcaNone"
         exp_id_str = f"_{args.exp_id}" if getattr(args, "exp_id", None) else ""
         # When exp_id is set (e.g. attnTrue_huber_pca2_baseline), use it instead of pca_str to match embedding-style path
-        suffix = f"{exp_id_str}" if exp_id_str else pca_str
+        suffix = f"{exp_id_str}" if exp_id_str else f"{layers_str}{pca_str}"
         log_dir = os.path.join(
             log_base,
             f"{args.region}_Astrocytes_expr_{args.loss_ptau}{attention_suffix}{dropout_str}{wd_str}{suffix}_testfold{test_fold_idx+1}",
@@ -276,6 +279,8 @@ if __name__ == "__main__":
     parser.add_argument("--verbose", action="store_true", default=True, help="Print per-epoch progress (default: True).")
     parser.add_argument("--no_verbose", action="store_false", dest="verbose", help="Disable per-epoch printing (quiet mode for batch runs)")
     parser.add_argument("--patience", type=int, default=20, help="Early stopping: stop if test loss does not improve for this many epochs (default: 20). Set to 0 to disable.")
+    parser.add_argument("--n_hidden_layers", type=int, default=1, choices=[1, 3], help="Number of hidden layers in baseline MLP: 1 (minimal) or 3 (original). Default: 1.")
+    parser.add_argument("--hidden_dim_3layer", type=int, default=32, help="Hidden size when n_hidden_layers=3 (default: 32).")
 
     main(parser.parse_args())
 

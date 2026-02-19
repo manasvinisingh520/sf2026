@@ -108,6 +108,10 @@ def parse_args():
                         help="Number of permutation repeats per gene (for stability); mean F1 drop is used")
     parser.add_argument("--log_base", type=str, default="run_new",
                         help="Base directory for TensorBoard logs (default: run_new)")
+    parser.add_argument("--n_hidden_layers", type=int, default=1, choices=[1, 3],
+                        help="Baseline MLP: 1 (minimal) or 3 (original) hidden layers (default: 1).")
+    parser.add_argument("--hidden_dim_3layer", type=int, default=32,
+                        help="Hidden size when n_hidden_layers=3 (default: 32).")
     return parser.parse_args()
 
 
@@ -277,6 +281,8 @@ def run_permutation_importance_expression(args):
                 input_dim=train_X.shape[1], input_shape=None,
                 n_thal_classes=len(idx_to_thal), use_attention=args.attention, num_heads=1,
                 dropout=exp_cfg["dropout"],
+                n_hidden_layers=args.n_hidden_layers,
+                hidden_dim_3layer=args.hidden_dim_3layer,
             ).to(device)
             optimizer = torch.optim.Adam(model.parameters(), lr=exp_cfg["lr"], weight_decay=exp_cfg["weight_decay"])
             criterion_ptau = None if args.loss_ptau == "none" else {"mse": nn.MSELoss(), "mae": nn.L1Loss(), "huber": nn.HuberLoss()}[args.loss_ptau]
@@ -451,8 +457,11 @@ def run_permutation_importance_embedding(args):
                 model = GeneEncoderModel(n_dims=n_dims, n_thal_classes=len(idx_to_thal), dropout=exp_cfg["dropout"], n_genes=n_genes).to(device)
                 lambda_entropy = exp_cfg["lambda_entropy"]
             else:
-                model = BaselineRankingModel(input_dim=input_dim, input_shape=input_shape, n_thal_classes=len(idx_to_thal),
-                    use_attention=args.attention, num_heads=1, dropout=exp_cfg["dropout"]).to(device)
+                model = BaselineRankingModel(
+                    input_dim=input_dim, input_shape=input_shape, n_thal_classes=len(idx_to_thal),
+                    use_attention=args.attention, num_heads=1, dropout=exp_cfg["dropout"],
+                    n_hidden_layers=args.n_hidden_layers, hidden_dim_3layer=args.hidden_dim_3layer,
+                ).to(device)
                 lambda_entropy = 0.0
             optimizer = torch.optim.Adam(model.parameters(), lr=exp_cfg["lr"], weight_decay=exp_cfg["weight_decay"])
             train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)

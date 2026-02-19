@@ -28,9 +28,9 @@ EXPERIMENTS = [
     {"name": "all_strong", "dropout": 0.5, "weight_decay": 1.0, "lr": 1e-4, "lambda_entropy": 1e-1},
 ]
 
-EXPERIMENTS = [
-    {"name": "baseline", "dropout": 0.2, "weight_decay": 0.1, "lr": 0.001, "lambda_entropy": 1e-3},
-]
+#EXPERIMENTS = [
+#    {"name": "baseline", "dropout": 0.2, "weight_decay": 0.1, "lr": 0.001, "lambda_entropy": 1e-3},
+#]
 
 GENE_ENCODER_OPTS = [False, True]
 ATTENTION_OPTS = [True, False]
@@ -61,6 +61,8 @@ def build_args(region, cell_type, exp, gene_encoder, attention, loss_ptau, pca_c
         log_base=log_base,
         exp_id=exp_id,
         verbose=False,
+        n_hidden_layers=getattr(base_args, "n_hidden_layers", 1),
+        hidden_dim_3layer=getattr(base_args, "hidden_dim_3layer", 32),
     )
 
 
@@ -191,5 +193,9 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cuda" if __import__("torch").cuda.is_available() else "cpu")
     parser.add_argument("--attention_heads", type=int, default=1)
     parser.add_argument("--log_base", type=str, default=None, help="Base dir for logs and CSV (default: {cell_type}_{region})")
+    parser.add_argument("--n_hidden_layers", type=int, default=1, choices=[1, 3],
+                        help="Number of hidden layers in baseline MLP: 1 (minimal) or 3 (original). Default: 1.")
+    parser.add_argument("--hidden_dim_3layer", type=int, default=32,
+                        help="Hidden size when n_hidden_layers=3 (default: 32).")
     args = parser.parse_args()
     run_experiments(args)

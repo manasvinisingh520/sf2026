@@ -28,11 +28,12 @@ EXPERIMENTS = [
 ]
 ATTENTION_OPTS = [True, False]
 LOSS_PTAU_OPTS = ["huber", "mse", "mae"]
-PCA_OPTS = [2, 4, 8, None]
+PCA_OPTS = [None]
 
-EXPERIMENTS = [
-    {"name": "baseline", "dropout": 0.2, "weight_decay": 0.1, "lr": 0.001, "lambda_entropy": 1e-3},
-]
+#EXPERIMENTS = [
+#    {"name": "baseline", "dropout": 0.2, "weight_decay": 0.1, "lr": 0.001, "lambda_entropy": 1e-3},
+#]
+
 LOSS_PTAU_OPTS = ["none"]
 
 def build_args(region, exp, attention, loss_ptau, pca_components, base_args):
@@ -53,6 +54,8 @@ def build_args(region, exp, attention, loss_ptau, pca_components, base_args):
         log_base=log_base,
         exp_id=exp_id,
         verbose=False,
+        n_hidden_layers=getattr(base_args, "n_hidden_layers", 1),
+        hidden_dim_3layer=getattr(base_args, "hidden_dim_3layer", 32),
     )
 
 
@@ -163,7 +166,7 @@ def run_experiments(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Astrocytes overfitting experiments on expression data (ptau + Thal)")
     parser.add_argument("--region", type=str, required=True, help="Region (e.g., EC, ITG, PFC)")
-    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--device", type=str, default="cuda" if __import__("torch").cuda.is_available() else "cpu")
     parser.add_argument("--attention_heads", type=int, default=1)
@@ -171,5 +174,9 @@ if __name__ == "__main__":
                         help="Base dir for logs and CSV (default: Astrocytes_{region}_Expression)")
     parser.add_argument("--output", type=str, default=None,
                         help="Output CSV path (default: Astrocytes_{region}_Expression/expression_experiments.csv)")
+    parser.add_argument("--n_hidden_layers", type=int, default=1, choices=[1, 3],
+                        help="Number of hidden layers in baseline MLP: 1 (minimal) or 3 (original). Default: 1.")
+    parser.add_argument("--hidden_dim_3layer", type=int, default=32,
+                        help="Hidden size when n_hidden_layers=3 (default: 32).")
     args = parser.parse_args()
     run_experiments(args)

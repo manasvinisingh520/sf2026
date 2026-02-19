@@ -339,7 +339,9 @@ def main(args):
                 n_thal_classes=n_thal_classes,
                 use_attention=args.attention,
                 num_heads=args.attention_heads if args.attention else 1,
-                dropout=args.dropout
+                dropout=args.dropout,
+                n_hidden_layers=args.n_hidden_layers,
+                hidden_dim_3layer=args.hidden_dim_3layer,
             ).to(device)
 
         optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -348,9 +350,10 @@ def main(args):
         attention_suffix = '_attn' if args.attention else ''
         dropout_str = f'_drop{args.dropout}'
         wd_str = f'_wd{args.weight_decay}'
+        layers_str = f'_L{args.n_hidden_layers}' if args.n_hidden_layers == 3 else ''
         exp_id_str = f"_{args.exp_id}" if getattr(args, 'exp_id', None) else ''
         log_base = getattr(args, 'log_base', 'runs')
-        log_dir = os.path.join(log_base, f'{args.region}_{args.pooling}_{args.loss_ptau}{model_suffix}{attention_suffix}{dropout_str}{wd_str}{exp_id_str}_testfold{test_fold_idx+1}')
+        log_dir = os.path.join(log_base, f'{args.region}_{args.pooling}_{args.loss_ptau}{model_suffix}{attention_suffix}{dropout_str}{wd_str}{layers_str}{exp_id_str}_testfold{test_fold_idx+1}')
         if os.path.exists(log_dir):
             try:
                 import shutil
@@ -474,6 +477,10 @@ if __name__ == "__main__":
                        help='Disable per-epoch printing (quiet mode for batch runs)')
     parser.add_argument('--patience', type=int, default=20,
                        help='Early stopping: stop if test loss does not improve for this many epochs (default: 20). Set to 0 to disable.')
+    parser.add_argument('--n_hidden_layers', type=int, default=1, choices=[1, 3],
+                       help='Baseline MLP: 1 (minimal) or 3 (original) hidden layers (default: 1).')
+    parser.add_argument('--hidden_dim_3layer', type=int, default=32,
+                       help='Hidden size when n_hidden_layers=3 (default: 32).')
     args = parser.parse_args()
 
     main(args)
